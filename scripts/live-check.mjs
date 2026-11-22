@@ -1544,24 +1544,45 @@ async function shape(cdp, { dataDir }) {
     // measure the arrival, not the value, so it is allowed to finish first.
     await sleep(700);
 
-    // Two and a half seconds, so at least two clock ticks land inside the
-    // window and a tween that never runs cannot pass by sampling a still value.
+    // A page that is not the active one has its animation frames throttled, and
+    // a tween driven by them simply does not advance: this check then reads one
+    // value 150 times and reports a broken tween. It happened once in `all` and
+    // never alone. Asking for the front is what makes the measurement possible;
+    // the frame timings below say whether it was granted, so a failure names a
+    // stalled page rather than a stalled animation.
+    await cdp.send('Page.bringToFront');
+
+    // Two and a half seconds of wall clock, so at least two clock ticks land
+    // inside the window and a tween that never runs cannot pass by sampling a
+    // still value. It used to be 150 frames, which is not a duration: 2.5 s on a
+    // 60 Hz display and 1.04 s on this machine's 144 Hz one — measured, not
+    // guessed, from a failure that read `150 frames in 1039 ms, visible,
+    // focused=true`. The window had quietly halved and the check began failing
+    // in `all` while passing alone.
     const readings = await cdp.evaluate(`(async () => {
       const seen = new Set();
       const boxes = new Set();
       const el = document.querySelector('.vd-panel-surface .vd-tabular');
-      for (let i = 0; i < 150; i += 1) {
+      const started = performance.now();
+      while (performance.now() - started < 2500) {
         seen.add(el.textContent);
         const box = el.getBoundingClientRect();
         boxes.add([box.x, box.y, box.width, box.height].join(':'));
         await new Promise((r) => requestAnimationFrame(r));
       }
-      return { values: [...seen], boxes: [...boxes] };
+      return {
+        values: [...seen],
+        boxes: [...boxes],
+        framesMs: Math.round(performance.now() - started),
+        visibility: document.visibilityState,
+        focused: document.hasFocus(),
+      };
     })()`);
     check(
       'a live number tweens instead of jumping',
       readings.values.length > 2,
-      `${readings.values.length} distinct readings`,
+      `${readings.values.length} distinct readings, 150 frames in ${readings.framesMs} ms, ` +
+        `${readings.visibility}, focused=${readings.focused}`,
     );
     check(
       'a changing number does not move the layout',
@@ -2102,10 +2123,36 @@ async function widget(cdp, { dataDir }) {
     );
     check('the declared action actually ran', focused);
 
-    const refused = await cdp.evaluate(
-      `document.body.innerText.includes('which the panel does not declare')`,
-    );
-    check('the refusal is reported to the user', refused);
+    // The notice is added when the refusal arrives, which is a frame or two after
+    // the widget reports its height: the two travel by different routes — the
+    // refusal through the app's message handler, the height through the frame's
+    // own resize. Reading the body once raced the notice, and under `all` (a panel
+    // already mounted, more work in flight) it lost the race twice in five runs.
+    // Poll for the sentence; when it never comes, report what the body did say.
+    const refusal = 'which the panel does not declare';
+    let refused = true;
+    try {
+      await waitFor(cdp, `document.body.innerText.includes(${JSON.stringify(refusal)})`, {
+        label: 'the refusal notice',
+        timeoutMs: 5000,
+      });
+    } catch {
+      refused = false;
+    }
+    // A failure has to say which of two very different things happened: the app
+    // never added the notice, or it added it somewhere the user cannot see.
+    // `innerText` only carries what is rendered; `innerHTML` carries what is in
+    // the tree. Disagreeing means the notice exists behind a closed surface.
+    const where = refused
+      ? ''
+      : await cdp.evaluate(`(() => ({
+          inText: document.body.innerText.includes(${JSON.stringify(refusal)}),
+          inTree: document.documentElement.innerHTML.includes(${JSON.stringify(refusal)}),
+          transcript: document.querySelectorAll('[class*=transcript], [class*=Transcript]').length,
+          panels: document.querySelectorAll('[class*=panel]').length,
+          tail: document.body.innerText.slice(-160),
+        }))()`);
+    check('the refusal is reported to the user', refused, JSON.stringify(where));
 
     // A widget lives inside the layout tree, so switching tabs has to unmount
     // its frame rather than leave a script running off screen.
@@ -3655,18 +3702,32 @@ async function keyboard(cdp, { dataDir, keep }) {
     check('the menu takes focus on open', focused.role === 'menuitem', JSON.stringify(focused));
 
     // 2. The arrow keys walk the menu.
+    //
+    // Each key waits for focus to actually land somewhere instead of sleeping a
+    // fixed 120 ms. The sleep was the same guess `waitFor` exists to replace: it
+    // passed alone and failed in `all`, twice in five runs, because the render
+    // that moves focus competes with whatever the previous suite left mounted.
+    // `settle` returns the label as soon as it changes and gives up after a
+    // second, so a menu whose keys genuinely do nothing still fails — with the
+    // label it stayed on.
     const walked = await cdp.evaluate(`(async () => {
-      const first = document.activeElement?.textContent?.trim() ?? null;
+      const label = () => document.activeElement?.textContent?.trim() ?? null;
+      const settle = async (was) => {
+        for (let i = 0; i < 20; i += 1) {
+          if (label() !== was) return label();
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return label();
+      };
+      const first = label();
       document.activeElement?.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
       );
-      await new Promise((r) => setTimeout(r, 120));
-      const second = document.activeElement?.textContent?.trim() ?? null;
+      const second = await settle(first);
       document.activeElement?.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
       );
-      await new Promise((r) => setTimeout(r, 120));
-      const back = document.activeElement?.textContent?.trim() ?? null;
+      const back = await settle(second);
       return { first, second, back, count: document.querySelectorAll('[role=menuitem]').length };
     })()`);
     check(

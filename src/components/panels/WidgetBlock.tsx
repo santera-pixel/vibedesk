@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Cpu, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Cpu, ShieldCheck } from 'lucide-react';
 import {
   MAX_WIDGET_PROMPT,
   WIDGET_HEIGHT,
@@ -140,6 +140,15 @@ export function WidgetBlock({
     Math.min(WIDGET_HEIGHT[1], Math.max(WIDGET_HEIGHT[0], height || 240)),
   );
 
+  // Capabilities this widget asked for and the block does not declare, in the
+  // order they were refused.
+  //
+  // The transcript notice alone was not enough: it is a chat item, and a panel
+  // can be open over the chat, which left the sentence in the DOM and invisible
+  // — the app's own live check read `innerText` and found nothing, `innerHTML`
+  // and found it. A refusal has to be where the thing that caused it is.
+  const [refused, setRefused] = useState<string[]>([]);
+
   // The height the frame is actually at, so a resize message that changes
   // nothing costs nothing. A widget that re-measures on every animation frame
   // sends the same number sixty times a second; without this the parent would
@@ -205,6 +214,7 @@ export function WidgetBlock({
         // told, and the user is told once, because a widget that loops on a
         // refused call would otherwise fill the notice stack.
         reply(false, `this widget did not declare the \`${capability}\` capability`);
+        setRefused((was) => (was.includes(capability) ? was : [...was, capability]));
         addNotice(
           `A widget in this panel asked for \`${capability}\`, which the panel does not declare.`,
           'warn',
@@ -354,6 +364,19 @@ export function WidgetBlock({
           </span>
         )}
       </div>
+
+      {refused.length > 0 && (
+        <p
+          className="m-0 mb-1.5 flex items-start gap-1 rounded-[var(--radius-xs)] border border-[color-mix(in_oklab,var(--vd-warn)_30%,transparent)] bg-[var(--vd-warn-wash)] px-1.5 py-1 text-[10px] leading-[1.45] text-[var(--vd-warn)]"
+          role="status"
+        >
+          <AlertTriangle size={9} strokeWidth={2} className="mt-0.5 shrink-0" />
+          <span className="min-w-0">
+            Asked for {refused.map((name) => `\`${name}\``).join(', ')}, which the panel
+            does not declare. The call was refused and the widget was told.
+          </span>
+        </p>
+      )}
 
       <div className="overflow-hidden rounded-[var(--radius-sm)] border border-[var(--vd-line)]">
         <iframe
