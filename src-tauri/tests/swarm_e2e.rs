@@ -238,6 +238,20 @@ impl Harness {
     }
 
     async fn start(&self) {
+        // The engine is a process-wide singleton, so a run the previous test left
+        // live refuses this one with "run … is still planning — stop it before
+        // starting another". The mutex serializes the tests; this makes each one
+        // start from a stopped run instead of inheriting the last one's state.
+        let stale = engine().run().filter(|run| run.state.is_live());
+        if let Some(run) = stale {
+            let sink: Arc<dyn vibedesk_lib::acp::bridge::EventSink> = self.sink.clone();
+            let _ = engine().stop(&sink);
+            wait_for(
+                &format!("run {} to stop", run.id),
+                Duration::from_secs(30),
+                || engine().run().map(|r| !r.state.is_live()).unwrap_or(true),
+            );
+        }
         engine()
             .start(
                 self.sink.clone(),
@@ -680,7 +694,17 @@ fn chain_plan_json() -> Value {
 fn chain_script() -> Value {
     json!({
         "members": {
-            "lead": [{ "files": { "<inbox>/plan.json": chain_plan_json() } }],
+            // Twice, because a chain's first rank is one task wide and the engine
+            // sends that back once (engine.rs `shape_send_back`) before accepting
+            // it whatever its shape. The scripted lead answers the second prompt
+            // with the same plan, which is what a lead asked to widen a chain that
+            // has nothing to widen says. One step here meant the run was sent back
+            // and then never answered, so this test timed out waiting for a plan
+            // that the gate had already agreed to accept on the retry.
+            "lead": [
+                { "files": { "<inbox>/plan.json": chain_plan_json() } },
+                { "files": { "<inbox>/plan.json": chain_plan_json() } }
+            ],
             "w-t1": [raise_a()],
             "v-t1": [{ "files": { "<inbox>/verdict.json": verdict("t1", "node --test test/a.test.js") } }],
             "w-t2": [raise_b()],

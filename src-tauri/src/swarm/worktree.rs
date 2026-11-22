@@ -359,10 +359,22 @@ pub fn identity(member: &str) -> (String, String) {
 }
 
 /// Point one worktree's git config at one member.
+///
+/// `--worktree` plus `extensions.worktreeConfig` is what makes this per-worktree.
+/// Without them `git config user.email` in a linked worktree writes the *shared*
+/// `.git/config`, so the last member to spawn owns every commit in the run: the
+/// end-to-end suite caught a t1 commit authored by `w-t2@swarm.local` because
+/// w-t2's worktree was set up second. The integration gate then refused the
+/// branch, correctly, for a commit its own worker had not authored.
+///
+/// The extension is written to the common config — that is where git reads it
+/// from — and is a one-time flag per repository, so setting it from a worktree is
+/// the intended way to do this.
 pub fn set_identity(git: &dyn Git, path: &Path, member: &str) -> Result<(), String> {
     let (name, email) = identity(member);
-    git.run(&["config", "user.name", &name], path)?;
-    git.run(&["config", "user.email", &email], path)?;
+    git.run(&["config", "extensions.worktreeConfig", "true"], path)?;
+    git.run(&["config", "--worktree", "user.name", &name], path)?;
+    git.run(&["config", "--worktree", "user.email", &email], path)?;
     Ok(())
 }
 
@@ -993,16 +1005,21 @@ mod tests {
             calls[0]
         );
         assert!(calls[0].ends_with("abc123"), "{}", calls[0]);
-        // Then the member's own identity. The checkout's directory name is the
-        // member id, so a commit made in this worktree is attributable: the
-        // audited run's verifier commit `e18875b` was indistinguishable from its
-        // worker's, because every worktree committed under the machine-wide
-        // identity.
+        // Then the member's own identity, written *per worktree*. The checkout's
+        // directory name is the member id, so a commit made in this worktree is
+        // attributable: the audited run's verifier commit `e18875b` was
+        // indistinguishable from its worker's, because every worktree committed
+        // under the machine-wide identity.
+        //
+        // `extensions.worktreeConfig` comes first because without it `git config`
+        // in a linked worktree edits the shared `.git/config` and every member
+        // inherits whoever was set up last.
         assert_eq!(
             calls[1..].to_vec(),
             vec![
-                "config user.name swarm-w1".to_string(),
-                "config user.email w1@swarm.local".to_string(),
+                "config extensions.worktreeConfig true".to_string(),
+                "config --worktree user.name swarm-w1".to_string(),
+                "config --worktree user.email w1@swarm.local".to_string(),
             ]
         );
     }

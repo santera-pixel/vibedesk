@@ -65,11 +65,33 @@ fn main() {
                     {
                         "id": "mode",
                         "currentValue": "auto",
-                        "options": [{ "value": "auto", "name": "auto" }]
+                        // The real agent offers one mode per installed swarm agent:
+                        // the app writes those TOMLs into VIBE_HOME/agents at
+                        // startup, and the engine refuses a member whose role mode
+                        // the session does not offer. A sim that offered only
+                        // `auto` failed every e2e run at the first spawn, so the
+                        // suite never reached the drive loop it exists to prove.
+                        "options": [
+                            { "value": "auto", "name": "auto" },
+                            { "value": "vibedesk-swarm-lead", "name": "Lead" },
+                            { "value": "vibedesk-swarm-worker", "name": "Worker" },
+                            { "value": "vibedesk-swarm-verifier", "name": "Verifier" },
+                            { "value": "vibedesk-swarm-reflector", "name": "Reflector" }
+                        ]
                     }
                 ]
             }),
-            "session/set_config_option" => json!({ "configOptions": [] }),
+            // The engine reads the applied value back, so the answer has to be
+            // the value it asked for rather than an empty list: a session that
+            // silently keeps its old mode is the failure the check exists for.
+            "session/set_config_option" => {
+                let id = params
+                    .get("configId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let value = params.get("value").cloned().unwrap_or(Value::Null);
+                json!({ "configOptions": [{ "id": id, "currentValue": value }] })
+            }
             "session/prompt" => {
                 let text = prompt_text(&params);
                 run_step(&script, &state, &text);
