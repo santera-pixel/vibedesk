@@ -182,6 +182,29 @@ pub struct Board {
     next_seq: u64,
 }
 
+/// Whether an entry belongs to the task at hand rather than to the cross-task
+/// chatter a digest is capped against.
+///
+/// Pinned: anything the board recorded against this task, and every escalation,
+/// conflict or verdict anywhere in the run. Everything else — a dependency's
+/// decision, the lead's broadcast constraint — is context, and context is capped
+/// so a brief stays a brief.
+fn constrains_the_work(entry: &BoardEntry, task: &str) -> bool {
+    if entry.task.as_deref() == Some(task) {
+        return true;
+    }
+    matches!(
+        entry.kind,
+        BoardKind::Escalation | BoardKind::Conflict | BoardKind::Verdict
+    )
+}
+
+/// One line of a digest.
+fn digest_line(entry: &BoardEntry) -> String {
+    let scope = entry.task.as_deref().unwrap_or("run");
+    format!("- [{scope}] {}\n", entry.text.trim())
+}
+
 impl Board {
     pub fn new() -> Self {
         Self {
@@ -300,25 +323,69 @@ impl Board {
             }
         }
 
+        // 4. The task's own record, and every escalation, conflict or verdict on
+        // the board, whatever its scope. These are not chatter: this is the
+        // history that would have told the audited run's w-t2 it had already been
+        // refused once for writing outside its grant.
+        for entry in &self.entries {
+            if matches!(
+                entry.kind,
+                BoardKind::Escalation | BoardKind::Conflict | BoardKind::Verdict
+            ) && seen.insert(entry.seq)
+            {
+                chosen.push(entry);
+            }
+        }
+        for entry in &self.entries {
+            if entry.task.as_deref() == Some(task) && seen.insert(entry.seq) {
+                chosen.push(entry);
+            }
+        }
+
         if chosen.is_empty() {
             return String::new();
         }
 
-        // Newest last, capped from the front: the most recent decisions are the
-        // ones that still constrain the work.
-        if chosen.len() > DIGEST_MAX_ENTRIES {
-            chosen.drain(..chosen.len() - DIGEST_MAX_ENTRIES);
-        }
+        // Pinned entries are rendered in full; the rest is capped from the front,
+        // because the most recent cross-task decisions are the ones that still
+        // constrain the work. A cap on the entries that exist to stop a repeat
+        // would be a cap on the memory the retry needed.
+        let (pinned, chatter): (Vec<&BoardEntry>, Vec<&BoardEntry>) = chosen
+            .into_iter()
+            .partition(|entry| constrains_the_work(entry, task));
 
-        let mut out = String::new();
-        for entry in chosen {
-            let scope = entry.task.as_deref().unwrap_or("run");
-            let line = format!("- [{scope}] {}\n", entry.text.trim());
-            if out.len() + line.len() > DIGEST_MAX_CHARS {
-                out.push_str("- …earlier decisions omitted\n");
+        let mut omitted = false;
+        let mut kept = if chatter.len() > DIGEST_MAX_ENTRIES {
+            omitted = true;
+            chatter[chatter.len() - DIGEST_MAX_ENTRIES..].to_vec()
+        } else {
+            chatter
+        };
+
+        let mut width = 0usize;
+        let mut retained: Vec<&BoardEntry> = Vec::new();
+        while let Some(entry) = kept.pop() {
+            let line = digest_line(entry);
+            if width + line.len() > DIGEST_MAX_CHARS {
+                omitted = true;
                 break;
             }
-            out.push_str(&line);
+            width += line.len();
+            retained.push(entry);
+        }
+        retained.reverse();
+
+        let mut ordered = pinned;
+        ordered.sort_by_key(|entry| entry.seq);
+        let mut out = String::new();
+        for entry in ordered {
+            out.push_str(&digest_line(entry));
+        }
+        if omitted {
+            out.push_str("- …earlier decisions omitted\n");
+        }
+        for entry in retained {
+            out.push_str(&digest_line(entry));
         }
         out
     }
@@ -586,6 +653,61 @@ mod tests {
         let digest = board.digest_for("t2", &["t1".to_string()]);
         assert!(digest.len() <= DIGEST_MAX_CHARS + 64, "{}", digest.len());
         assert!(digest.contains("omitted"));
+    }
+
+    /// The audited run's fifth fault: the digest a worker received was capped at
+    /// twelve entries, so the newest cross-task chatter evicted the escalation the
+    /// engine had raised against that very task. w-t2 then built the wrong thing a
+    /// second time. What concerns a task is not chatter.
+    #[test]
+    fn a_task_sees_its_own_escalation_past_the_chatter_cap() {
+        let mut board = Board::new();
+        board.append(
+            BoardEntry::new(
+                "engine",
+                BoardKind::Escalation,
+                "w-t2 committed files outside its grant",
+            )
+            .about("t2"),
+        );
+        for index in 0..(DIGEST_MAX_ENTRIES + 6) {
+            board.append(decision("w1", "t1", &format!("decision number {index}")));
+        }
+
+        let digest = board.digest_for("t2", &["t1".to_string()]);
+        assert!(digest.contains("outside its grant"), "{digest}");
+        // The chatter is still capped, and still keeps the newest.
+        let chatter = digest
+            .lines()
+            .filter(|line| line.contains("decision number"))
+            .count();
+        assert_eq!(chatter, DIGEST_MAX_ENTRIES, "{digest}");
+        assert!(digest.contains("decision number 17"), "{digest}");
+        assert!(!digest.contains("decision number 5"), "{digest}");
+    }
+
+    /// A task's own record is never truncated, however many entries it holds.
+    ///
+    /// The cap exists so another task's context does not crowd out this one's
+    /// work. Applied to this one's own history it does the opposite: it deletes
+    /// the record of what was already tried.
+    #[test]
+    fn a_tasks_own_record_is_never_truncated() {
+        let mut board = Board::new();
+        let attempts = DIGEST_MAX_ENTRIES * 3;
+        for index in 0..attempts {
+            board.append(
+                BoardEntry::new("w-t2", BoardKind::Note, format!("attempt {index}")).about("t2"),
+            );
+        }
+
+        let digest = board.digest_for("t2", &[]);
+        for index in 0..attempts {
+            assert!(
+                digest.contains(&format!("attempt {index}\n")),
+                "lost attempt {index} of {attempts}"
+            );
+        }
     }
 
     #[test]
