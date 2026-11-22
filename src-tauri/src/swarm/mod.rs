@@ -1226,13 +1226,14 @@ pub struct Budget {
     /// token ceiling is the only one.
     #[serde(default)]
     pub max_spend_micros: Option<u64>,
-    /// The percentage of the ceiling that has been spent.
-    ///
-    /// Reported so a run cannot be misread again: a percentage of the cap is the
-    /// number that answers "is this run in trouble", and it was the one number the
-    /// payload did not carry.
+    /// The share of the money ceiling spent, or `None` when the run cannot be
+    /// priced. Never a token ratio: that number used to live here and read as money.
     #[serde(default)]
-    pub spend_pct: f64,
+    pub spend_pct: Option<f64>,
+    /// The share of the token ceiling spent, counting the quantity `exceeded()`
+    /// compares so the percentage and the stop condition cannot disagree.
+    #[serde(default)]
+    pub token_pct: f64,
     /// The share of input tokens the provider served from its cache, 0..1.
     #[serde(default)]
     pub hit_rate: f64,
@@ -1255,7 +1256,8 @@ impl Default for Budget {
             spent_tokens: 0,
             spend_micros: None,
             max_spend_micros: None,
-            spend_pct: 0.0,
+            spend_pct: None,
+            token_pct: 0.0,
             hit_rate: 0.0,
             unpriced_models: Vec::new(),
             rates_version: rates::RATES_VERSION,
@@ -1673,13 +1675,15 @@ impl Run {
         self.budget.spend_micros = (priced > 0 && unpriced.is_empty()).then_some(micros);
         self.budget.rates_version = rates::RATES_VERSION;
         self.budget.spend_pct = match (self.budget.max_spend_micros, self.budget.spend_micros) {
-            (Some(ceiling), Some(spent)) if ceiling > 0 => spent as f64 / ceiling as f64 * 100.0,
-            // No money ceiling set, so the token ceiling is the only bound there
-            // is — and the percentage is against that, in tokens.
-            _ if self.budget.max_tokens > 0 => {
-                self.budget.spent_tokens as f64 / self.budget.max_tokens as f64 * 100.0
+            (Some(ceiling), Some(spent)) if ceiling > 0 => {
+                Some(spent as f64 / ceiling as f64 * 100.0)
             }
-            _ => 0.0,
+            _ => None,
+        };
+        self.budget.token_pct = if self.budget.max_tokens > 0 {
+            self.budget.spent_tokens as f64 / self.budget.max_tokens as f64 * 100.0
+        } else {
+            0.0
         };
     }
 
@@ -2187,8 +2191,17 @@ mod tests {
         assert_eq!(run.budget.spend_micros, Some(1_470_000));
         assert!(run.budget.unpriced_models.is_empty());
         assert_eq!(run.budget.rates_version, rates::RATES_VERSION);
-        // No money ceiling set, so the percentage is against the token ceiling.
-        assert!((run.budget.spend_pct - 615_000.0 / 2_000_000.0 * 100.0).abs() < 1e-9);
+        // No money ceiling was set, so there is no money percentage at all; the
+        // token percentage is the one that exists, and it counts billed tokens.
+        assert_eq!(run.budget.spend_pct, None);
+        assert!((run.budget.token_pct - 615_000.0 / 2_000_000.0 * 100.0).abs() < 1e-9);
+
+        // With a ceiling and a price, the money percentage is the answer and it
+        // is 1,470,000 of 2,940,000 µusd.
+        run.budget.max_spend_micros = Some(2_940_000);
+        run.recompute_spend();
+        assert_eq!(run.budget.spend_micros, Some(1_470_000));
+        assert_eq!(run.budget.spend_pct, Some(50.0));
 
         // A member on a model this table does not price makes the money absent
         // rather than zero, and names the model.
@@ -2197,6 +2210,10 @@ mod tests {
         run.members.push(local);
         run.recompute_spend();
         assert_eq!(run.budget.spend_micros, None);
+        assert_eq!(
+            run.budget.spend_pct, None,
+            "a run that cannot be priced has no money percentage"
+        );
         assert_eq!(run.budget.unpriced_models, vec!["some-local-gguf".to_string()]);
     }
 

@@ -295,6 +295,81 @@ Two findings the audit did not have, both from running the end-to-end suite
   tests died at the first spawn. A suite that fails before the drive loop is not
   a suite.
 
+### Two live runs - the rehearsal, and the four defects it found
+
+The authorised rehearsal was run twice against `swarm-run.exe` on a real
+workspace (a git repo with `math.js` and `test/math.test.js`, node v24.18.0),
+models `deepseek` for the lead and workers and `mistral-large-4-0-3` for the
+verifiers, `--budget-micros 1500000 --concurrency 2 --timeout 600`, two-task
+chains. Run 1 was the code as it stood; run 2 was the same shape after the fixes
+below. Nothing here is a scripted agent: these are model calls, wall clock and
+provider usage fields.
+
+| | run 1 (`run-20261122-171008-000`) | run 2 (`run-20261122-172307-000`) |
+|---|---|---|
+| goal | add `subtract` + its test | add `multiply` + its test |
+| outcome | `done`, 2/2 verified, merged, suite passed | `done`, 2/2 verified, merged, suite passed |
+| wall clock | 356 s | **182 s** |
+| plan attempts | 1 (one revision) | **0** |
+| restarts | 2 infra, both after the task was already verified | **0** |
+| members left `working` at the end | v-t1, v-t2 | none - every member parked or done |
+| agent processes released | never announced; 6 orphaned | 4 released, announced (board seq 28) |
+| runner exit | never - the process hung after the report | **exit 0, on its own** |
+| traffic / cached / fresh | 3,691,367 / 3,422,592 (92.7%) / 268,775 | 1,118,879 / 960,768 (85.9%) / 158,111 |
+| money | `spendMicros` null, `spendPct` **6.72** | `spendMicros` null, `spendPct` **null**, `tokenPct` 3.95 |
+| per-task progress | `filesChanged` 1, `commits` 1, `verifiedCommit` set | same |
+
+Run 1's 356 s contained 186 s of revision the plan never needed and two respawned
+verifiers that burned roughly 415k of its 3.69M input tokens doing work for tasks
+that were already verified. Run 2 is not 2x faster because the model is; it is
+faster because that waste is gone, and it was measured going.
+
+**Defect A - the engine's own stop was reported as a lost provider.** Board
+seq 19, 20, 21 and 22 in run 1: `v-t1` posted its verdict at `17:15:06.365`, the
+task was marked verified at `.904`, and at `.909` the engine wrote "v-t1 could
+not get an answer: the agent process exited", then at `.912` restarted it. The
+verifier had been retired on purpose - `retire_verifier` stops its bridge - and
+the turn still awaiting that bridge read the close as a dropped provider. The
+respawned `v-t1` then posted evidence at `17:15:50` for a task verified 25 s
+earlier, and the same thing happened to `v-t2`. Because nothing stopped the
+respawned verifiers, `swarm-run` could not exit at all: six `vibe-acp` processes
+were still alive a minute after the run reported `done`, and the runtime waits
+on the bridge reader threads that wait on those children. Fixed by one owner for
+the stop - `Inner::take_bridge` records it, `put_bridge` clears it, every removal
+and every insert goes through them - plus a hard rule that a terminal run
+restarts nothing (`after_turn_error` parks the member and charges nothing).
+`release_bridges` now releases through `take_bridge`, so the end-of-run release
+is recorded too.
+
+**Defect B - `spendPct` measured a ceiling nobody asked about.** Run 1 reported
+`spendMicros: null` (no `deepseek` row in `RATES`) beside `spendPct: 6.72`. That
+6.72 was `spentTokens / maxTokens` - a token ratio in a field documented as the
+share of the money ceiling spent. It is the same class of error as reading `56M`
+as spend: the number is real, the label is not, and it is exactly what a reader
+would quote as "6% of the budget spent" on a run whose money figure was unknown.
+Fixed: `spend_pct` is `Option<f64>` and is `None` when there is no money ceiling
+or when any model is unpriced; the token ratio is its own field, `token_pct`,
+computed from the same quantity `exceeded()` compares so the percentage and the
+stop condition cannot disagree.
+
+**Defect C - the shape gate revised a plan that could not be widened.** Run 1's
+two-task chain was refused at `17:10:54` ("only t1 can start - the first rank is
+one task wide") and accepted at `17:14:00` on revision 1: 186 s and one lead turn
+spent telling the engine that a chain of two dependencies has no wider shape to
+revise towards. `shape_send_back` now withholds the revision when
+`shape.max_parallel <= 1`; the warning is still recorded and still shown (run 2
+board seq 2 and 3), because the user should see the shape even when nothing can
+be done about it. The end-to-end harness lost its second scripted lead step as a
+result, and `a_chain_is_not_sent_back` pins the new rule.
+
+**Defect D - a unit test wrote into the user's real home.** Eight empty
+directories sat in `~/.vibe/worktrees` after eight `cargo test --lib` runs: the
+`prepare_verifier` test removed its two checkouts and left the run directory they
+lived in. A test that writes into the user's install is a test that changes the
+machine it is measuring. It now calls `worktree::release_run`, and the suite was
+re-run afterwards to confirm `~/.vibe/worktrees` stays empty (0 entries). The
+eight directories were removed.
+
 Correction to §2's fault 5 as written: `skills.rs:168`'s 2400-char cap is the
 *ranking* body, not the brief. A `Skill`'s body is stripped from the serialized
 catalogue (`skills.rs:1113`), so nothing truncates an instruction a member
@@ -304,18 +379,35 @@ receives. The board digest was the only real truncation, and it is fixed.
 
 | Command | Result |
 |---|---|
-| `cargo test --lib -- swarm::` | 664 passed, 0 failed, 6 ignored, 4.59 s |
-| `cargo test --lib` | 1537 passed, 0 failed, 10 ignored, 6.34 s |
-| `cargo test --test swarm_e2e` | 6 passed, 0 failed, 50.86 s (was 0 passed, 6 failed at spawn) |
+| `cargo test --lib -- swarm::` | 668 passed, 0 failed, 6 ignored, 5.17 s |
+| `cargo test --lib` | 1541 passed, 0 failed, 10 ignored, 6.37 s |
+| `cargo test --test swarm_e2e` | 6 passed, 0 failed, 49.81 s (was 0 passed, 6 failed at spawn) |
 | `cargo check --all-targets` | clean |
+| `~/.vibe/worktrees` after the whole suite | 0 entries (was one empty run directory per invocation) |
+| `swarm-run` rehearsal, run 1 | `done` in 356 s, 2/2 verified, 2 bogus restarts, process hung |
+| `swarm-run` rehearsal, run 2 | `done` in 182 s, 2/2 verified, 0 restarts, exit 0 |
+
+The four tests added or rewritten by this pass are `a_chain_is_not_sent_back`,
+`the_engines_own_stop_is_recorded_and_a_new_bridge_clears_it`,
+`a_finished_run_restarts_nothing_and_charges_nothing`, and
+`a_one_wide_first_rank_is_a_one_shot_send_back`, which now uses a plan with a
+wide later rank instead of a chain.
 
 ### Still not done
 
-- **The rehearsal run has not happened.** The plan authorises one small run (2–3
-  tasks) to measure `spendMicros`, timing and `unpricedModels` against the money
-  ledger. Nothing in this table is a substitute for it: the unit tests exercise
-  helpers and the end-to-end suite drives a scripted agent, so no model call has
-  been made or billed by any of this.
+- **Money is still unmeasured on this machine, because `deepseek` has no
+  `rates::RATES` row.** Both rehearsal runs reported `spendMicros: null` with
+  `unpricedModels: ["deepseek"]`, which is the intended behaviour - a partial sum
+  presented as a bill is worse than no sum - but it means the money ceiling has
+  never been exercised against a real price. The fix is a rate row supplied by the
+  user; inventing one would be the guess the ledger exists to refuse. Until then
+  the only honest ceiling is the token one, and `token_pct` is the number that
+  reads against it.
+- **`--budget-micros` therefore cannot stop a `deepseek` run.** `exceeded()` reads
+  `(max_spend_micros, spend_micros)` and returns false while the spend is unknown,
+  so a run on unpriced models is bounded by `maxTokens` and the wall clock only.
+  That is deliberate - failing every unpriced run would make local models unusable
+  - but it is a real gap in the money ceiling, not a completed feature.
 - **`RATES` is a table, not a bill.** The numbers are the published per-model
   rates at the version in `rates_version`; a run on a model the table does not
   know reports itself as unpriced rather than guessing (verified by
@@ -329,14 +421,18 @@ receives. The board digest was the only real truncation, and it is fixed.
 
 ## 6. Not proven
 
-- No live run has been made since these changes. Every result above is a test
-  executable's own output, run on this machine today; a real run adds the model,
-  the provider and the wall clock, and could still fail in ways no scripted agent
-  shows.
-- The throughput claim (fewer restarts, less re-reading) is a mechanism, not a
-  measurement: `MAX_INFRA_RESTARTS` and the cause split make a dead process
-  distinguishable from a slow one, but the improvement in verified-artifacts-per-
-  hour is unmeasured until the rehearsal.
+- The throughput claim is measured on exactly one shape: two two-task chains on
+  one workspace with one model pair, 356 s to 182 s. That is not a claim about
+  eighteen-task runs, a slower provider, or a codebase the workers have to read
+  before their first commit, and the difference includes the lost revision and the
+  two bogus respawns the fixes removed. The number is an upper bound on the saving
+  for this shape, not an average.
+- `MAX_INFRA_RESTARTS = 3` has never fired in a live run. Both rehearsals had zero
+  infra restarts after the fixes, so the ceiling is only exercised by tests.
+- The clock that fails a genuinely wedged member (`MEMBER_IDLE_LIMIT_SECS`) has
+  still not fired live. Run 1 showed a lead mid-turn past 300 s with a nudge that
+  could not be delivered; that path works, but the 600 s threshold itself is
+  untested against a real wedge.
 - `MAX_INFRA_RESTARTS = 3` is a judgement, not a derived figure. Three covers a
   one-off crash of a shared process; a run that trips it on a machine where the
   agent legitimately restarts more often would need the number raised, and that

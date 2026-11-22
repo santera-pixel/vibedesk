@@ -331,6 +331,7 @@ fn describe(run: &Run) -> Value {
             "spendMicros": run.budget.spend_micros,
             "maxSpendMicros": run.budget.max_spend_micros,
             "spendPct": run.budget.spend_pct,
+            "tokenPct": run.budget.token_pct,
             "hitRate": run.budget.hit_rate,
             "unpricedModels": run.budget.unpriced_models,
             "ratesVersion": run.budget.rates_version,

@@ -12,7 +12,7 @@
 //! is what makes `session/list` filter it out of the workstation's chat list by
 //! construction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -348,6 +348,28 @@ struct Inner {
     /// this process is exactly the moment a write from another one could have
     /// slipped in beside it.
     board_bytes: u64,
+    /// Members whose agent process this engine stopped itself. A turn awaiting a
+    /// bridge the engine took away sees the same close a dropped provider gives.
+    stopped: BTreeSet<String>,
+}
+
+impl Inner {
+    /// Take the member's bridge, recording that the stop was the engine's.
+    fn take_bridge(&mut self, member_id: &str) -> Option<Arc<AcpBridge>> {
+        self.stopped.insert(member_id.to_string());
+        self.bridges.remove(member_id)
+    }
+
+    /// Give the member a bridge, which makes an earlier stop stale.
+    fn put_bridge(&mut self, member_id: &str, bridge: Arc<AcpBridge>) {
+        self.stopped.remove(member_id);
+        self.bridges.insert(member_id.to_string(), bridge);
+    }
+
+    /// Whether the last thing this engine did to the member was stop its process.
+    fn stopped_deliberately(&self, member_id: &str) -> bool {
+        self.stopped.contains(member_id)
+    }
 }
 
 impl Default for Engine {
@@ -364,6 +386,7 @@ impl Default for Engine {
                 adopted: false,
                 driver_lock: None,
                 board_bytes: 0,
+                stopped: BTreeSet::new(),
             }),
         }
     }
@@ -379,6 +402,14 @@ impl Engine {
     /* -------------------------------------------------------------- *
      * Reading
      * -------------------------------------------------------------- */
+
+    /// Whether the engine stopped this member's process itself.
+    pub(crate) fn stopped_deliberately(&self, member_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stopped_deliberately(member_id)
+    }
 
     /// The live run, cloned.
     pub fn run(&self) -> Option<Run> {
@@ -818,7 +849,7 @@ impl Engine {
                 );
                 {
                     let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    inner.bridges.insert("lead".into(), bridge.clone());
+                    inner.put_bridge("lead", bridge.clone());
                     inner.watches.insert("lead".into(), watch.clone());
                     inner.usage.insert("lead".into(), usage.clone());
                     if let Some(run) = inner.run.as_mut() {
@@ -2080,7 +2111,7 @@ async fn invalidate_built_on(run: &mut Run, failed: &str) -> Vec<String> {
             let bridge = {
                 let engine = engine();
                 let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
-                inner.bridges.remove(&member_id)
+                inner.take_bridge(&member_id)
             };
             if let Some(bridge) = bridge {
                 let _ = bridge.stop().await;
@@ -2438,7 +2469,7 @@ fn spawn_for_task(
 
                 {
                     let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    inner.bridges.insert(member_id.clone(), bridge.clone());
+                    inner.put_bridge(&member_id, bridge.clone());
                     inner.watches.insert(member_id.clone(), watch.clone());
                     // The same ledger the gate was handed, so a respawn inserts
                     // the accumulation it is already writing into rather than a
@@ -2542,6 +2573,11 @@ async fn drive_turn(
         return;
     }
     stop_turn_clock(member_id);
+    // A close the engine caused is not a member that failed: the engine stops a
+    // member whose part in the run is over.
+    if engine().stopped_deliberately(member_id) {
+        return;
+    }
     let message = error.to_string();
     engine().post(
         BoardEntry::new(
@@ -2708,6 +2744,18 @@ fn after_turn_error(
     cause: RestartCause,
     error: &str,
 ) -> Option<Restart> {
+    // A run that has ended has no members left to restart: the release at the end
+    // of a run wakes every awaiting turn with a closed connection.
+    if run.state.is_terminal() {
+        if let Some(member) = run.member_mut(member_id) {
+            member.error = Some(error.to_string());
+            if member.state.is_live() {
+                member.state = MemberState::Parked;
+                member.parked_at = Some(now());
+            }
+        }
+        return None;
+    }
     let Some(member) = run.member_mut(member_id) else {
         return None;
     };
@@ -2789,9 +2837,13 @@ fn restart_or_fail(
     emit(sink, &snapshot);
     {
         let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.bridges.remove(member_id);
+        inner.take_bridge(member_id);
     }
     let Some(restart) = restart else {
+        // Nothing to escalate: the member's part was settled before the close.
+        if snapshot.state.is_terminal() {
+            return;
+        }
         // Either the lead, which has already failed the run, or a member that
         // has spent its restarts. Both are already written down; the board line
         // is what makes the reason findable without opening the roster.
@@ -3192,7 +3244,7 @@ fn spawn_reflector(sink: Arc<dyn EventSink>, run_id: String) {
 
                 {
                     let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    inner.bridges.insert(REFLECTOR_ID.to_string(), bridge.clone());
+                    inner.put_bridge(REFLECTOR_ID, bridge.clone());
                     inner.watches.insert(REFLECTOR_ID.to_string(), watch.clone());
                     inner.usage.insert(REFLECTOR_ID.to_string(), usage.clone());
                     if let Some(run) = inner.run.as_mut() {
@@ -3321,7 +3373,7 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
         }
         {
             let mut inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.bridges.remove(&id);
+            inner.take_bridge(&id);
         }
         // A verifier gets its brief again; a worker gets what the verifier said,
         // because the worktree it is restarting into already carries its work.
@@ -4888,7 +4940,7 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                     // counters start at zero, and `Usage::observe` reads a
                     // reading that went down as a new session, so the spend from
                     // the first attempt is kept rather than erased.
-                    inner.bridges.remove(&verifier);
+                    inner.take_bridge(&verifier);
                 }
                 if let Some(member) = next.member_mut(&verifier) {
                     member.state = MemberState::Starting;
@@ -5371,7 +5423,7 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                         {
                             let mut inner =
                                 engine.inner.lock().unwrap_or_else(|e| e.into_inner());
-                            inner.bridges.remove(&member_id);
+                            inner.take_bridge(&member_id);
                         }
                         if let Some(member) = next.member_mut(&member_id) {
                             member.state = MemberState::Starting;
@@ -6424,8 +6476,20 @@ fn criteria_passing_on_base(
 /// that genuinely starts with one foundation task is legitimate, so a retry is
 /// accepted whatever its shape: `plan_attempts > 0` means the lead has already
 /// been sent back once.
+///
+/// A plan whose widest rank is one task is not sent back at all: the chain *is*
+/// the plan, so there is no wider shape to revise towards. The live rehearsal
+/// made the cost visible — a two-task chain, one slot of real parallelism
+/// available and none possible, was refused, and the lead spent a whole revision
+/// turn proving the engine's warning did not apply to it. The warning is still
+/// recorded by `shape_warnings` and shown to the user; only the revision is
+/// withheld, because a revision can only return the same plan or invent
+/// parallelism the dependency graph forbids.
 fn shape_send_back(plan_attempts: u32, plan: &Plan) -> Option<String> {
     if plan_attempts > 0 {
+        return None;
+    }
+    if plan::shape(plan).max_parallel <= 1 {
         return None;
     }
     plan::shape_warnings(plan)
@@ -6578,7 +6642,7 @@ async fn retire_verifier(next: &mut Run, task_id: &str) {
     let bridge = {
         let engine = engine();
         let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.bridges.remove(&verifier)
+        inner.take_bridge(&verifier)
     };
     if let Some(bridge) = bridge {
         let _ = bridge.stop().await;
@@ -6796,12 +6860,13 @@ fn write_run(run: &Run) {
 pub async fn release_bridges() -> usize {
     let bridges: Vec<(String, Arc<AcpBridge>)> = {
         let mut inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
-        let taken = inner
-            .bridges
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+        let ids: Vec<String> = inner.bridges.keys().cloned().collect();
+        // Through `take_bridge`: a release this engine performed must be recorded,
+        // or the awaiting turn answers it by spawning a replacement.
+        let taken = ids
+            .into_iter()
+            .filter_map(|id| inner.take_bridge(&id).map(|bridge| (id, bridge)))
             .collect();
-        inner.bridges.clear();
         inner.watches.clear();
         taken
     };
@@ -7458,6 +7523,35 @@ mod tests {
             TaskState::Running,
             "one failed turn is not a failed task"
         );
+    }
+
+    /// A run that has ended restarts nothing. The release wakes every awaiting
+    /// turn with a closed connection, and one verdict-verified task was respawned.
+    #[test]
+    fn a_finished_run_restarts_nothing_and_charges_nothing() {
+        let mut run = run_with_silent_worker(TaskState::Verified, 0);
+        run.state = RunState::Done;
+        assert!(
+            after_turn_error(
+                &mut run,
+                "w-t1",
+                RestartCause::Provider,
+                "the agent closed the connection",
+            )
+            .is_none(),
+            "a run that has ended has no member left to restart"
+        );
+        let worker = run.member("w-t1").unwrap();
+        assert_eq!(
+            worker.state,
+            MemberState::Parked,
+            "the roster stops describing a task that ended"
+        );
+        assert_eq!(worker.respawns, 0, "nothing was restarted, so nothing is charged");
+        assert_eq!(worker.restarts_infra, 0);
+        assert_eq!(worker.restarts_provider, 0);
+        assert!(worker.error.as_deref().unwrap_or_default().contains("closed"));
+        assert_eq!(run.task("t1").unwrap().state, TaskState::Verified);
     }
 
     /// The restart is bounded, so a provider that is down cannot loop forever.
@@ -9366,6 +9460,30 @@ name: a");
         }
     }
 
+    /// One foundation task, then three that all depend on it: a first rank of
+    /// one and a widest rank of three. The shape a revision can fix, and the
+    /// shape a plan has when only its first rank is serial.
+    fn foundation_then_three() -> Plan {
+        let mut tasks = vec![
+            Task::new("t1", "a", "", "cargo test").with_files(&["src/one.rs"]),
+        ];
+        for id in ["t2", "t3", "t4"] {
+            let file = format!("src/{id}.rs");
+            tasks.push(
+                Task::new(id, "a", "", "cargo test")
+                    .with_files(&[file.as_str()])
+                    .with_deps(&["t1"]),
+            );
+        }
+        Plan {
+            goal: "g".into(),
+            tasks,
+            integration_suite: Some("cargo test".into()),
+            notes: String::new(),
+            skills_to_write: Vec::new(),
+        }
+    }
+
     /// The budget follows the plan instead of a constant.
     ///
     /// The observed run was a five-deep chain given a flat hour, so its own
@@ -9451,9 +9569,14 @@ name: a");
     /// accepted whatever its shape, and a wide first rank is accepted
     /// immediately. Run 3's board carried the warning as a note and accepted
     /// the plan anyway.
+    ///
+    /// The plan here is one foundation task followed by three tasks that all
+    /// depend on it: a first rank of one, a widest rank of three. That is the
+    /// shape the revision can fix. A pure chain has no wider rank to revise
+    /// towards, and is covered by `a_chain_is_not_sent_back`.
     #[test]
     fn a_one_wide_first_rank_is_a_one_shot_send_back() {
-        let one_wide = five_deep_plan();
+        let one_wide = foundation_then_three();
         let reason = shape_send_back(0, &one_wide).expect("the first attempt is sent back");
         assert!(
             reason.contains("only t1 can start"),
@@ -9478,6 +9601,66 @@ name: a");
         assert!(
             shape_send_back(0, &wide).is_none(),
             "a three-wide first rank is accepted immediately"
+        );
+    }
+
+    /// The engine's own stop is recorded, and a new process makes it stale. It has
+    /// to be set by the removal itself: the roster is updated after the stop.
+    #[test]
+    fn the_engines_own_stop_is_recorded_and_a_new_bridge_clears_it() {
+        let mut inner = Inner {
+            run: None,
+            board: Board::new(),
+            bridges: BTreeMap::new(),
+            usage: BTreeMap::new(),
+            watches: BTreeMap::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            driving: false,
+            adopted: false,
+            driver_lock: None,
+            board_bytes: 0,
+            stopped: BTreeSet::new(),
+        };
+        let bridge = Arc::new(AcpBridge::with_sink(Arc::new(
+            crate::acp::bridge::NullSink,
+        )));
+        inner.put_bridge("v-t1", bridge.clone());
+        assert!(
+            !inner.stopped_deliberately("v-t1"),
+            "a live process is not a stopped one"
+        );
+
+        assert!(inner.take_bridge("v-t1").is_some());
+        assert!(
+            inner.stopped_deliberately("v-t1"),
+            "the engine took the process away, so the close is the engine's"
+        );
+        assert!(inner.take_bridge("v-t1").is_none(), "the bridge is gone once");
+
+        inner.put_bridge("v-t1", bridge);
+        assert!(
+            !inner.stopped_deliberately("v-t1"),
+            "a fresh process is not covered by the earlier stop"
+        );
+    }
+
+    /// A pure chain is never sent back: the dependency graph is the plan, so
+    /// "widen the first rank" is not an instruction it can obey.
+    #[test]
+    fn a_chain_is_not_sent_back() {
+        let chain = five_deep_plan();
+        assert_eq!(plan::shape(&chain).max_parallel, 1);
+        assert!(
+            shape_send_back(0, &chain).is_none(),
+            "a chain has no wider rank to revise towards"
+        );
+        // The warning is still recorded, so the user still sees the shape; only
+        // the revision is withheld.
+        assert!(
+            plan::shape_warnings(&chain)
+                .iter()
+                .any(|w| matches!(w, plan::ShapeWarning::OneWideFirstRank { .. })),
+            "the shape is still reported as a warning"
         );
     }
 
@@ -9979,8 +10162,10 @@ name: a");
             "preparing a verifier must not start its process"
         );
 
-        let _ = worktree::remove_worktree(&CommandGit, &repo, &path);
-        let _ = worktree::remove_worktree(&CommandGit, &repo, &prep.base_path);
+        // `release_run`, not two `remove_worktree`s: the second left the run's
+        // directory behind in the user's real `~/.vibe/worktrees`.
+        let problems = worktree::release_run(&CommandGit, &repo, &run_id);
+        assert!(problems.is_empty(), "the test's own checkouts are removed: {problems:?}");
         let _ = std::fs::remove_dir_all(&repo);
     }
 

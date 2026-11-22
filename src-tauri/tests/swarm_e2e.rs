@@ -694,17 +694,12 @@ fn chain_plan_json() -> Value {
 fn chain_script() -> Value {
     json!({
         "members": {
-            // Twice, because a chain's first rank is one task wide and the engine
-            // sends that back once (engine.rs `shape_send_back`) before accepting
-            // it whatever its shape. The scripted lead answers the second prompt
-            // with the same plan, which is what a lead asked to widen a chain that
-            // has nothing to widen says. One step here meant the run was sent back
-            // and then never answered, so this test timed out waiting for a plan
-            // that the gate had already agreed to accept on the retry.
-            "lead": [
-                { "files": { "<inbox>/plan.json": chain_plan_json() } },
-                { "files": { "<inbox>/plan.json": chain_plan_json() } }
-            ],
+            // Once, because a chain is accepted on its first shape: a plan whose
+            // widest rank is one task has no wider rank to revise towards, so
+            // `shape_send_back` withholds the revision and records the warning
+            // instead. Two steps here would leave the second one unused and hide a
+            // regression that started revising chains again.
+            "lead": [{ "files": { "<inbox>/plan.json": chain_plan_json() } }],
             "w-t1": [raise_a()],
             "v-t1": [{ "files": { "<inbox>/verdict.json": verdict("t1", "node --test test/a.test.js") } }],
             "w-t2": [raise_b()],
