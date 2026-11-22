@@ -171,7 +171,10 @@ pub async fn swarm_request_stop(app: tauri::AppHandle) -> AppResult<Run> {
 /// Delete a run and everything it owns.
 #[tauri::command]
 pub async fn swarm_delete(app: tauri::AppHandle, id: String) -> AppResult<()> {
-    engine::engine().delete(&sink(app), &id).map_err(AppError::message)
+    engine::engine()
+        .delete(&sink(app), &id)
+        .await
+        .map_err(AppError::message)
 }
 
 /// Load a finished run into the panel without resuming it.

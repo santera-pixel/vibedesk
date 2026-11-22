@@ -560,23 +560,54 @@ fn release_run_at(git: &dyn Git, repo: &Path, root: &Path) -> Vec<String> {
 /// How many non-terminal runs keep their checkouts.
 pub const RETAINED_RUNS: usize = 10;
 
-/// Remove the checkout directories under `root` of every run except the
-/// `RETAINED_RUNS` most recent non-terminal ones.
+/// How long a checkout directory whose run cannot be found is left alone.
 ///
-/// `run_info` maps a run id to whether it is terminal and the workspace its
-/// checkouts are registered in; a run it cannot resolve is left alone. Returns
-/// the run ids whose directories are gone — decided by what is on disk, not by
-/// git's verdict, because `remove_worktree` reports git's failure even when it
-/// then removed the directory anyway.
+/// A run that is starting has a checkout before it has a `run.json`, so an
+/// unresolvable directory is not proof that nothing owns it. An hour is longer
+/// than any start-up, and shorter than the retention the user would notice.
+pub const ORPHAN_GRACE_SECS: u64 = 60 * 60;
+
+/// Remove the checkout directories under `root` of every run that is over, and of
+/// every live run past the `RETAINED_RUNS` most recent.
+///
+/// Three cases, and the old code had two of them wrong.
+///
+/// A **finished** run's leftover checkouts are removed. `Done` releases its own
+/// as it stops, so a directory still there belongs to a cleanup that failed — the
+/// audited `swarm_stop` left four worktrees because `git worktree remove --force`
+/// failed on three of them while the killed workers still held the directories.
+///
+/// A run that ended any other way — cancelled, failed, escalated, interrupted —
+/// keeps its checkouts, because they are the only place its half-finished work
+/// exists, and the user can still discard them explicitly. Those are retained
+/// newest-first along with the live runs, capped at [`RETAINED_RUNS`].
+///
+/// An **unresolvable** directory is removed once it is older than
+/// [`ORPHAN_GRACE_SECS`]. This was the leak: `run_info` returned `None` for a run
+/// whose `run.json` was gone — deleted by hand, or never written — and the loop
+/// `continue`d, so those directories were never reaped and never counted. The
+/// machine had 120 of them against a retention of 10.
+///
+/// Returns the run ids whose directories are gone — decided by what is on disk,
+/// not by git's verdict, because `remove_worktree` reports git's failure even when
+/// it then removed the directory anyway.
 fn reap_at(
     git: &dyn Git,
     root: &Path,
-    run_info: &dyn Fn(&str) -> Option<(bool, PathBuf)>,
+    run_info: &dyn Fn(&str) -> Option<(super::RunState, PathBuf)>,
+    grace: std::time::Duration,
 ) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
+    let now = std::time::SystemTime::now();
     let mut live: Vec<(String, std::time::SystemTime, PathBuf)> = Vec::new();
+    // `None` is a directory with no run behind it: there is no workspace to run
+    // git in, so it is deleted without unregistering anything. Git forgets it on
+    // the next `git worktree prune` in whichever repository registered it, and a
+    // stale registration costs a line in `git worktree list` — cheaper than
+    // guessing a repository and pruning someone else's.
+    let mut reapable: Vec<(String, Option<PathBuf>)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -585,24 +616,45 @@ fn reap_at(
         let Some(id) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             continue;
         };
-        let Some((terminal, workspace)) = run_info(&id) else {
-            continue;
-        };
-        if terminal {
-            continue;
-        }
         let at = entry
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        live.push((id, at, workspace));
+        match run_info(&id) {
+            // Finished: nothing will read these again.
+            Some((super::RunState::Done, workspace)) => reapable.push((id, Some(workspace))),
+            // Everything else keeps its checkouts, live or not: a cancelled run's
+            // worktree is the only copy of the work its worker had done.
+            Some((_, workspace)) => live.push((id, at, workspace)),
+            None => {
+                // No run, so no one can be driving it — but check the age rather
+                // than trusting that: a run writes its directory before its
+                // `run.json`, and reaping a checkout mid-start would kill it.
+                let age = now.duration_since(at).unwrap_or_default();
+                if age > grace {
+                    reapable.push((id, None));
+                }
+            }
+        }
     }
     // Most recent first, ties broken by id so the choice is deterministic;
     // everything past the retained count is reaped.
     live.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    reapable.extend(
+        live.into_iter()
+            .skip(RETAINED_RUNS)
+            .map(|(id, _, workspace)| (id, Some(workspace))),
+    );
     let mut removed = Vec::new();
-    for (id, _, workspace) in live.into_iter().skip(RETAINED_RUNS) {
-        let _ = release_run_at(git, &workspace, &root.join(&id));
+    for (id, workspace) in reapable {
+        match workspace {
+            Some(workspace) => {
+                let _ = release_run_at(git, &workspace, &root.join(&id));
+            }
+            None => {
+                let _ = remove_stale_dir(&root.join(&id));
+            }
+        }
         if !root.join(&id).exists() {
             removed.push(id);
         }
@@ -617,11 +669,16 @@ fn reap_at(
 /// "forever": 105 directories under `~/.vibe/worktrees`. Keep the ten most
 /// recent, reap the rest, and return what was reaped so the caller can post it.
 pub fn reap_checkouts(git: &dyn Git) -> Vec<String> {
-    reap_at(git, &worktree_root(), &|id: &str| {
-        super::Run::load(id)
-            .ok()
-            .map(|run| (run.state.is_terminal(), PathBuf::from(run.workspace)))
-    })
+    reap_at(
+        git,
+        &worktree_root(),
+        &|id: &str| {
+            super::Run::load(id)
+                .ok()
+                .map(|run| (run.state, PathBuf::from(run.workspace)))
+        },
+        std::time::Duration::from_secs(ORPHAN_GRACE_SECS),
+    )
 }
 
 /// Every path a worker committed on its own branch, since `base`.
@@ -1639,8 +1696,9 @@ mod tests {
             std::fs::write(checkout.join("work.txt"), "x").unwrap();
             ids.push(id);
         }
-        let info = |_id: &str| Some((false, repo_dir.clone()));
-        let removed = reap_at(&CommandGit, &root, &info);
+        // A failed run keeps its checkouts like a live one, so retention applies.
+        let info = |_id: &str| Some((super::super::RunState::Failed, repo_dir.clone()));
+        let removed = reap_at(&CommandGit, &root, &info, std::time::Duration::from_secs(ORPHAN_GRACE_SECS));
 
         assert_eq!(removed.len(), 1, "exactly one run is past the retained count");
         assert_eq!(
@@ -1657,21 +1715,71 @@ mod tests {
         std::fs::remove_dir_all(&repo_dir).ok();
     }
 
-    /// Terminal runs are not reaped: their own drive loop released them.
+    /// A terminal run's leftover checkouts are reaped, because "its own cleanup"
+    /// is the thing that failed.
+    ///
+    /// The audited `swarm_stop` left four worktrees behind: `git worktree remove
+    /// --force` failed on three of them because the stopped workers still held the
+    /// directories, and the state directory was then deleted by hand — which made
+    /// those directories unresolvable as well as abandoned. A run that stops
+    /// cleanly releases its own checkouts, so a directory still there at reap time
+    /// belongs to a stop that did not finish.
     #[test]
-    fn terminal_runs_are_left_to_their_own_cleanup() {
+    fn a_terminal_runs_leftover_checkouts_are_reaped() {
         let repo_dir = real_repo("reap-terminal");
         let root = std::env::temp_dir().join(format!("vd-reapt-{}", crate::swarm::new_run_id()));
         for i in 0..(RETAINED_RUNS + 1) {
             let id = format!("run-done-{i:02}");
             std::fs::create_dir_all(root.join(&id).join("w-t1")).unwrap();
         }
-        let info = |_id: &str| Some((true, repo_dir.clone()));
-        let removed = reap_at(&CommandGit, &root, &info);
-        assert!(removed.is_empty());
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), RETAINED_RUNS + 1);
+        let info = |_id: &str| Some((super::super::RunState::Done, repo_dir.clone()));
+        let removed = reap_at(
+            &CommandGit,
+            &root,
+            &info,
+            std::time::Duration::from_secs(ORPHAN_GRACE_SECS),
+        );
+        assert_eq!(
+            removed.len(),
+            RETAINED_RUNS + 1,
+            "every leftover of a finished run is removed, not just the excess"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&repo_dir).ok();
+    }
+
+    /// A checkout directory with no run behind it is reaped once it is old
+    /// enough — and left alone until then.
+    ///
+    /// This is the leak that put 120 directories under `~/.vibe/worktrees`
+    /// against a retention of 10. The old loop asked `run_info` for the run,
+    /// got nothing for a directory whose `run.json` had been deleted, and
+    /// `continue`d — so those directories were never counted and never reaped.
+    #[test]
+    fn a_checkout_with_no_run_behind_it_is_reaped_after_the_grace_period() {
+        let root = std::env::temp_dir().join(format!("vd-orphan-{}", crate::swarm::new_run_id()));
+        for id in ["run-orphan-one", "run-orphan-two"] {
+            std::fs::create_dir_all(root.join(id).join("w-t1")).unwrap();
+        }
+        let no_run = |_id: &str| None;
+
+        // Inside the grace period nothing is touched: a run writes its checkout
+        // before it writes `run.json`, and reaping a start would kill it.
+        let kept = reap_at(
+            &CommandGit,
+            &root,
+            &no_run,
+            std::time::Duration::from_secs(ORPHAN_GRACE_SECS),
+        );
+        assert!(kept.is_empty(), "a fresh directory may still belong to a start");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+
+        let reaped = reap_at(&CommandGit, &root, &no_run, std::time::Duration::ZERO);
+        assert_eq!(reaped.len(), 2);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

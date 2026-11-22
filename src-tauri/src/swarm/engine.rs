@@ -1175,7 +1175,19 @@ impl Engine {
     }
 
     /// Delete a run and everything it owns.
-    pub fn delete(&self, sink: &Arc<dyn EventSink>, id: &str) -> Result<(), String> {
+    ///
+    /// The order is the fix for the audit's sixth fault, in which a cancelled run
+    /// left four worktrees and four branches behind: `git worktree remove --force`
+    /// failed with "Permission denied" on three of them because the worker
+    /// processes the engine had stopped were still holding the directories, and
+    /// the branches had to be deleted by hand afterwards.
+    ///
+    /// So: stop the member processes, then remove the checkouts, then delete the
+    /// branches, then the run directory. Anything that could not be cleaned is
+    /// named in the event the panel receives, because a delete that reports
+    /// success and leaves a directory behind is the failure this ordering exists
+    /// to prevent.
+    pub async fn delete(&self, sink: &Arc<dyn EventSink>, id: &str) -> Result<(), String> {
         {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             // A live run owns worktrees and member sessions that are still being
@@ -1201,16 +1213,39 @@ impl Engine {
                 inner.driver_lock = None;
             }
         }
-        // Read before the directory goes: the workspace path lives in the run
-        // document, and the checkouts cannot be found without it.
-        let workspace = Run::load(id).ok().map(|run| PathBuf::from(&run.workspace));
+        // Read before the directory goes: the workspace path and the branch names
+        // live in the run document, and neither can be found afterwards.
+        let loaded = Run::load(id).ok();
+        let workspace = loaded.as_ref().map(|run| PathBuf::from(&run.workspace));
+        let branches: Vec<String> = loaded
+            .as_ref()
+            .map(|run| {
+                let mut names: Vec<String> = run
+                    .tasks
+                    .iter()
+                    .map(|task| worktree::branch_name(&run.id, &task.id))
+                    .collect();
+                if !run.integration.branch.trim().is_empty() {
+                    names.push(run.integration.branch.clone());
+                }
+                names
+            })
+            .unwrap_or_default();
+        // The member processes first. Windows keeps a directory locked while the
+        // process that has it open is alive, and `stop` returns when the child has
+        // been signalled rather than when the OS has finished tearing it down.
+        release_bridges().await;
         super::delete_run(id)?;
-        // The run's checkouts go with it. A deleted run is a run nobody will
-        // post-mortem, so there is nothing left for them to be evidence of.
+        let mut problems: Vec<String> = Vec::new();
         if let Some(workspace) = workspace {
-            let _ = worktree::release_run(&CommandGit, &workspace, id);
+            problems.extend(worktree::release_run(&CommandGit, &workspace, id));
+            for branch in branches {
+                if let Err(error) = worktree::delete_branch(&CommandGit, &workspace, &branch) {
+                    problems.push(format!("the branch {branch} could not be deleted: {error}"));
+                }
+            }
         }
-        sink.emit(EVENT_SWARM, json!({ "deleted": id }));
+        sink.emit(EVENT_SWARM, json!({ "deleted": id, "cleanupProblems": problems }));
         Ok(())
     }
 
