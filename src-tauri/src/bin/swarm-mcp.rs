@@ -290,6 +290,13 @@ fn describe(run: &Run) -> Value {
                 "model": member.model,
                 "task": member.task,
                 "error": member.error,
+                // Which clock fired, per cause. `restarts` alone could not answer
+                // the audit's question: a dead process and a wedged turn both
+                // showed up as a restart.
+                "restarts": member.respawns,
+                "restartsInfra": member.restarts_infra,
+                "restartsTimeout": member.restarts_timeout,
+                "restartsProvider": member.restarts_provider,
             })
         })
         .collect();

@@ -1012,6 +1012,23 @@ pub struct Member {
     /// Input tokens served from the provider's prompt cache.
     #[serde(default)]
     pub cached_tokens: u64,
+    /// Restarts charged because the agent process was gone, not because the model
+    /// was slow.
+    ///
+    /// The audited run could not tell these apart: a worker doing a long think and
+    /// a worker whose process had died both arrived as "restarted it on t3". They
+    /// are different problems. A dead process is not going to answer however long
+    /// it is given, and restarting it repeatedly is how a run spends its budget
+    /// learning nothing.
+    #[serde(default)]
+    pub restarts_infra: u32,
+    /// Restarts charged because the member was silent past
+    /// [`super::engine::MEMBER_IDLE_LIMIT_SECS`].
+    #[serde(default)]
+    pub restarts_timeout: u32,
+    /// Restarts charged because a provider or transport refused the call.
+    #[serde(default)]
+    pub restarts_provider: u32,
     /// Seconds this member spent inside turns.
     #[serde(default)]
     pub active_secs: f64,
@@ -1106,6 +1123,9 @@ impl Member {
             tokens_in: 0,
             tokens_out: 0,
             cached_tokens: 0,
+            restarts_infra: 0,
+            restarts_timeout: 0,
+            restarts_provider: 0,
             active_secs: 0.0,
             context_used: 0,
             context_size: 0,

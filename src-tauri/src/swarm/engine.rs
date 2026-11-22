@@ -2523,7 +2523,92 @@ async fn drive_turn(
         )
         .about("run"),
     );
-    restart_or_fail(sink, member_id, &message);
+    restart_or_fail(sink, member_id, RestartCause::of(&error), &message);
+}
+
+/// How many times the agent process may be found dead in one run before the run
+/// stops trying.
+///
+/// Small on purpose. An infra restart is not a slow model: the process is gone,
+/// so every worker shares the cause and each restart spends a member's budget and
+/// a task's context re-reading its brief. The audited run lost two workers in the
+/// same eight seconds to exactly this, spent one of each member's two restarts on
+/// it, and could not say afterwards which clock had fired. Three is enough to
+/// rule out a one-off crash of a shared process; the fourth says the process is
+/// the problem.
+pub const MAX_INFRA_RESTARTS: u32 = 3;
+
+/// Why a member is being restarted.
+///
+/// The audit's third fault: three liveness mechanisms — the evidence nudge, the
+/// wedged limit and driver-process death — fed one restart path that logged
+/// "restarted it on t3" and nothing else the log can be asked about. These are
+/// not interchangeable. A process that is gone will not answer later; a model
+/// that is thinking might; a provider that refused might serve the next call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartCause {
+    /// The agent process is gone, was never reachable, or the transport to it
+    /// closed: [`crate::error::AppError::AgentExited`], `AgentNotRunning`,
+    /// `NoSession`, a missing binary or an io error on the pipe.
+    Infra,
+    /// The member was silent past [`MEMBER_IDLE_LIMIT_SECS`].
+    Timeout,
+    /// A provider or transport refused the call: an RPC error or a timeout.
+    Provider,
+}
+
+impl RestartCause {
+    /// Which clock fired, from the error the bridge returned.
+    ///
+    /// Classified by variant rather than by message text: the message is written
+    /// for a person, and string-matching it would break silently the first time
+    /// somebody rewords it.
+    pub fn of(error: &crate::error::AppError) -> Self {
+        use crate::error::AppError;
+        match error {
+            AppError::AgentNotRunning
+            | AppError::AgentExited(_)
+            | AppError::NoSession
+            | AppError::BinaryNotFound(_)
+            | AppError::Io(_) => RestartCause::Infra,
+            AppError::TurnStalled(_) | AppError::Timeout(_) => RestartCause::Timeout,
+            AppError::Rpc { .. } | AppError::Message(_) | AppError::Json(_) | AppError::Toml { .. } => {
+                RestartCause::Provider
+            }
+            // The two startup states are not failures of a running member; they are
+            // refusals the caller has to answer. Classed as infra because that is
+            // the only one of the three that a restart cannot fix by waiting.
+            AppError::AgentAlreadyRunning | AppError::TurnInProgress => RestartCause::Infra,
+        }
+    }
+
+    /// How the board names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            RestartCause::Infra => "the agent process is gone",
+            RestartCause::Timeout => "silent past the wedged limit",
+            RestartCause::Provider => "the provider refused the call",
+        }
+    }
+}
+
+/// Whether the run has lost the agent process often enough to stop.
+///
+/// `Some(sentence)` means stop: the sentence is the failure the run records, and
+/// it names the count and the cause so the next reader does not have to infer it
+/// from a restart line. `None` means the run may keep trying.
+fn infra_overloaded(run: &Run) -> Option<String> {
+    let total: u32 = std::iter::once(&run.lead)
+        .chain(run.members.iter())
+        .map(|member| member.restarts_infra)
+        .sum();
+    if total <= MAX_INFRA_RESTARTS {
+        return None;
+    }
+    Some(format!(
+        "the agent process died {total} times in this run — stopped instead of restarting a {}th time",
+        total + 1
+    ))
 }
 
 /// Whether a restart could be charged, and why not when it could not.
@@ -2550,7 +2635,7 @@ enum Charge {
 /// `Starting` is the flag that makes it idempotent: both paths set it as part of
 /// charging, so whichever loses the race sees a restart already in flight rather
 /// than a member to charge for.
-fn charge_restart(member: &mut Member) -> Charge {
+fn charge_restart(member: &mut Member, cause: RestartCause) -> Charge {
     if member.state == MemberState::Starting {
         return Charge::AlreadyRestarting;
     }
@@ -2558,6 +2643,15 @@ fn charge_restart(member: &mut Member) -> Charge {
         return Charge::Exhausted;
     }
     member.respawns += 1;
+    match cause {
+        RestartCause::Infra => member.restarts_infra = member.restarts_infra.saturating_add(1),
+        RestartCause::Timeout => {
+            member.restarts_timeout = member.restarts_timeout.saturating_add(1);
+        }
+        RestartCause::Provider => {
+            member.restarts_provider = member.restarts_provider.saturating_add(1);
+        }
+    }
     member.state = MemberState::Starting;
     member.session_id = None;
     member.pid = None;
@@ -2580,7 +2674,12 @@ fn charge_restart(member: &mut Member) -> Charge {
 /// The lead is the exception. It has no task to restart, and a run whose lead
 /// cannot be reached has no plan and no way to get one, so the run fails with
 /// the provider's own words rather than sitting in `planning` forever.
-fn after_turn_error(run: &mut Run, member_id: &str, error: &str) -> Option<Restart> {
+fn after_turn_error(
+    run: &mut Run,
+    member_id: &str,
+    cause: RestartCause,
+    error: &str,
+) -> Option<Restart> {
     let Some(member) = run.member_mut(member_id) else {
         return None;
     };
@@ -2588,7 +2687,7 @@ fn after_turn_error(run: &mut Run, member_id: &str, error: &str) -> Option<Resta
     let verify = member.role == Role::Verifier;
     let lead = member.role == Role::Lead;
     member.error = Some(error.to_string());
-    let charge = charge_restart(member);
+    let charge = charge_restart(member, cause);
     if lead {
         member.state = MemberState::Failed;
         run.state = RunState::Failed;
@@ -2610,24 +2709,50 @@ fn after_turn_error(run: &mut Run, member_id: &str, error: &str) -> Option<Resta
         }
         Charge::Allowed => {}
     }
+
+    // Charged, and the count is now over the ceiling: stop the run rather than
+    // spend another member's budget on a process that is not there. The member is
+    // failed with the run so the roster and the run agree about why.
+    if cause == RestartCause::Infra {
+        if let Some(failure) = infra_overloaded(run) {
+            run.state = RunState::Failed;
+            run.failure = Some(failure);
+            if let Some(member) = run.member_mut(member_id) {
+                member.state = MemberState::Failed;
+            }
+            if let Some(task) = task.clone() {
+                if let Some(record) = run.task_mut(&task) {
+                    record.state = TaskState::Failed;
+                }
+            }
+            return None;
+        }
+    }
+
     let task = task?;
     Some(Restart {
         member: member_id.to_string(),
         task,
         verify,
+        cause,
         reason: Some(error.to_string()),
     })
 }
 
 /// Apply [`after_turn_error`] and, when it says to, start the member again.
-fn restart_or_fail(sink: &Arc<dyn EventSink>, member_id: &str, error: &str) {
+fn restart_or_fail(
+    sink: &Arc<dyn EventSink>,
+    member_id: &str,
+    cause: RestartCause,
+    error: &str,
+) {
     let engine = engine();
     let (snapshot, restart) = {
         let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(run) = inner.run.as_mut() else {
             return;
         };
-        let restart = after_turn_error(run, member_id, error);
+        let restart = after_turn_error(run, member_id, cause, error);
         run.touch();
         (run.clone(), restart)
     };
@@ -2665,13 +2790,18 @@ fn restart_or_fail(sink: &Arc<dyn EventSink>, member_id: &str, error: &str) {
         }
         return;
     };
+    // The clock is named, because the audit's finding was that none of the three
+    // said which one had fired: "w-t3 stopped responding — restarted it on t3" was
+    // the same line for a dead process, a wedged turn and a refused nudge.
     engine.post(
         BoardEntry::new(
             "engine",
             BoardKind::Note,
             format!(
-                "{} could not get an answer — restarted it on {}: {error}",
-                restart.member, restart.task
+                "{} could not get an answer on {} — {} — restarted it: {error}",
+                restart.member,
+                restart.task,
+                restart.cause.label()
             ),
         )
         .about(&restart.task),
@@ -3095,6 +3225,9 @@ struct Restart {
     member: String,
     task: String,
     verify: bool,
+    /// Which clock fired, carried so the board line and the panel can name it
+    /// rather than saying "restarted it" and leaving the reader to guess.
+    cause: RestartCause,
     reason: Option<String>,
 }
 
@@ -3153,7 +3286,7 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
         // process exit could spend both slots.
         let allowed = next
             .member_mut(&id)
-            .map(charge_restart)
+            .map(|member| charge_restart(member, RestartCause::Timeout))
             .unwrap_or(Charge::Exhausted);
         if allowed != Charge::Allowed {
             continue;
@@ -3181,6 +3314,7 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
             member: id,
             task: task_id,
             verify,
+            cause: RestartCause::Timeout,
             reason,
         });
     }
@@ -7267,7 +7401,12 @@ mod tests {
     #[test]
     fn a_member_whose_turn_failed_is_restarted_with_the_reason() {
         let mut run = run_with_silent_worker(TaskState::Running, 0);
-        let restart = after_turn_error(&mut run, "w-t1", "agent request failed (500): upstream answered 400")
+        let restart = after_turn_error(
+            &mut run,
+            "w-t1",
+            RestartCause::Provider,
+            "agent request failed (500): upstream answered 400",
+        )
             .expect("a worker with restarts left is restarted");
 
         assert_eq!(restart.member, "w-t1");
@@ -7300,7 +7439,7 @@ mod tests {
         run.member_mut("w-t1").unwrap().respawns = MAX_RESPAWNS;
 
         assert!(
-            after_turn_error(&mut run, "w-t1", "upstream answered 400").is_none(),
+            after_turn_error(&mut run, "w-t1", RestartCause::Provider, "upstream answered 400").is_none(),
             "the ceiling is what stops the loop"
         );
         assert_eq!(run.member("w-t1").unwrap().state, MemberState::Failed);
@@ -7321,7 +7460,7 @@ mod tests {
         run.lead.state = MemberState::Working;
 
         assert!(
-            after_turn_error(&mut run, "lead", "upstream answered 400").is_none(),
+            after_turn_error(&mut run, "lead", RestartCause::Provider, "upstream answered 400").is_none(),
             "a lead has no task to restart"
         );
         assert_eq!(run.state, RunState::Failed);
@@ -7360,14 +7499,24 @@ mod tests {
         // restarted again and sat `Working` with no process.
         let mut run = run_with_silent_worker(TaskState::Running, MEMBER_IDLE_LIMIT_SECS + 60);
 
-        let first = after_turn_error(&mut run, "w-t1", "the Vibe agent is not running");
+        let first = after_turn_error(
+            &mut run,
+            "w-t1",
+            RestartCause::Infra,
+            "the Vibe agent is not running",
+        );
         assert!(first.is_some(), "the first death is restartable");
         let member = run.member("w-t1").unwrap();
         assert_eq!(member.respawns, 1, "one death, one slot");
         assert_eq!(member.state, MemberState::Starting);
 
         // The other path arriving at the same death must not charge again.
-        let second = after_turn_error(&mut run, "w-t1", "the Vibe agent is not running");
+        let second = after_turn_error(
+            &mut run,
+            "w-t1",
+            RestartCause::Infra,
+            "the Vibe agent is not running",
+        );
         assert!(
             second.is_none(),
             "a restart already in flight must not be charged twice"
@@ -7377,6 +7526,117 @@ mod tests {
             1,
             "the budget is spent once per death"
         );
+
+        std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
+    }
+
+    /// Which clock fired is a fact about the error, not a sentence to parse.
+    ///
+    /// The audit's third fault: the evidence nudge, the wedged limit and driver
+    /// death all arrived as "restarted it on t3", so a dead process and a slow
+    /// model were the same event in the log. Classification is by variant, so
+    /// rewording a message cannot reclassify a death.
+    #[test]
+    fn a_restart_is_classified_by_the_error_that_caused_it() {
+        use crate::error::AppError;
+
+        assert_eq!(
+            RestartCause::of(&AppError::AgentNotRunning),
+            RestartCause::Infra
+        );
+        assert_eq!(
+            RestartCause::of(&AppError::AgentExited("exit code 1".into())),
+            RestartCause::Infra
+        );
+        assert_eq!(RestartCause::of(&AppError::NoSession), RestartCause::Infra);
+        assert_eq!(
+            RestartCause::of(&AppError::BinaryNotFound("vibe-acp".into())),
+            RestartCause::Infra
+        );
+        assert_eq!(
+            RestartCause::of(&AppError::TurnStalled(600)),
+            RestartCause::Timeout
+        );
+        assert_eq!(RestartCause::of(&AppError::Timeout(120)), RestartCause::Timeout);
+        assert_eq!(
+            RestartCause::of(&AppError::Rpc {
+                code: -32603,
+                message: "upstream answered 400".into(),
+            }),
+            RestartCause::Provider
+        );
+
+        // The three remedies differ, so the sentences differ.
+        assert_ne!(RestartCause::Infra.label(), RestartCause::Provider.label());
+        assert_ne!(RestartCause::Infra.label(), RestartCause::Timeout.label());
+    }
+
+    /// Each cause has its own counter, and the budget stays one number.
+    #[test]
+    fn a_restart_is_counted_against_the_clock_that_fired() {
+        let mut member = Member::new("w-t1", Role::Worker, "m");
+        member.state = MemberState::Working;
+
+        assert_eq!(
+            charge_restart(&mut member, RestartCause::Infra),
+            Charge::Allowed
+        );
+        assert_eq!((member.respawns, member.restarts_infra), (1, 1));
+
+        member.state = MemberState::Working;
+        assert_eq!(
+            charge_restart(&mut member, RestartCause::Timeout),
+            Charge::Allowed
+        );
+        assert_eq!((member.respawns, member.restarts_timeout), (2, 1));
+
+        // The budget is spent: a third charge is refused whatever the cause, and
+        // the counter it would have moved stays where it was.
+        member.state = MemberState::Working;
+        assert_eq!(
+            charge_restart(&mut member, RestartCause::Provider),
+            Charge::Exhausted
+        );
+        assert_eq!((member.respawns, member.restarts_provider), (2, 0));
+        assert_eq!(member.restarts_infra, 1);
+    }
+
+    /// The run stops when the agent process keeps dying.
+    ///
+    /// Retrying is the right answer to a slow model and the wrong one to a process
+    /// that is gone: every restart spends a member's budget and re-buys the
+    /// context the task had accumulated, which is where the audited run's 51.5M
+    /// cached tokens came from. The ceiling is small because the cause is shared —
+    /// one process death is every worker's problem.
+    #[test]
+    fn the_run_stops_when_the_agent_process_keeps_dying() {
+        let mut run = run_with_silent_worker(TaskState::Running, 0);
+        assert_eq!(infra_overloaded(&run), None, "nothing has died yet");
+
+        run.member_mut("w-t1").unwrap().restarts_infra = MAX_INFRA_RESTARTS;
+        assert_eq!(
+            infra_overloaded(&run),
+            None,
+            "the ceiling is the last restart that is still worth trying"
+        );
+
+        // Reached through the restart path, the run is failed rather than retried.
+        run.member_mut("w-t1").unwrap().state = MemberState::Working;
+        let restart = after_turn_error(
+            &mut run,
+            "w-t1",
+            RestartCause::Infra,
+            "the Vibe agent is not running",
+        );
+        assert!(restart.is_none(), "a dead process is not restarted again");
+        assert_eq!(run.state, RunState::Failed);
+        let failure = run.failure.clone().unwrap_or_default();
+        assert!(
+            failure.contains("died 4 times"),
+            "the failure has to name the count: {failure}"
+        );
+        assert_eq!(run.member("w-t1").unwrap().state, MemberState::Failed);
+        assert_eq!(run.task("t1").unwrap().state, TaskState::Failed);
 
         std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
     }
