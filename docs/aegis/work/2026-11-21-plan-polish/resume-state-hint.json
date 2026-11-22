@@ -2,9 +2,9 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-11-21-plan-polish",
   "lastCheckpointRef": "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json",
-  "resumeInstruction": "Re-read docs/PLAN-polish.md Verification section and 20-checkpoint.md; worktree is authority; not a git repo",
+  "resumeInstruction": "Repo is now a git repo at D:/MistralVibe on main, origin=santera-pixel/vibedesk (public); work record at docs/aegis/work/2026-11-21-plan-polish",
   "knownPartialWork": [
-    "t1 stop_process deadlock; t2 retire_verifier; t3 AmendError::NoOp; t4 scratch briefs; t5 one-wide send-back; t6 destructive() quote-aware; t7 denial message; t8 live process count in panel + live_count; t9 checkout retention (reap, keep 10); t10 game.sh builds first"
+    "t1-t10 verified (649 rust tests targeted, 291 frontend, tsc, release build); folder cleaned (.scratch .shots .codebase-memory .repos target/debug target/tmp deleted, user-confirmed); release rebuilt 2026-11-22 10:19-10:21 (0 sources newer than exe); git init+commit c550d05+push main to public santera-pixel/vibedesk (289 tracked files, 0 junk); github MCP server added to ~/.vibe/config.toml (stdio npx @modelcontextprotocol/server-github, token via ~/.vibe/.env GITHUB_PERSONAL_ACCESS_TOKEN - user adds)"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-11-21-plan-polish/10-intent.md",
@@ -12,6 +12,6 @@
     "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "full-suite not re-run after t7 (CPU); targeted swarm+acp coverage is the evidence; battletests::efficiency and channel::window are environment-flaky, untouched by this diff"
+    "github MCP tools not loaded in this session (added post-start); gh CLI was used for the push; vibedesk cbm index deleted, rebuilds on next index_repository"
   ]
 }
