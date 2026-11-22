@@ -575,6 +575,56 @@ however it ends. **Falsified**: with `job::adopt` stubbed out the test fails wit
 `members [15856] outlived the engine that started them` after 21.6 s; restored, it
 passes in 0.9-11.5 s.
 
+### The installed build, proved by running it
+
+The release build was installed over `D:\VibeDesk` (five binaries, `data/`
+untouched, the previous `vibedesk.exe` kept as `vibedesk.exe.bak-2309`) and every
+one of them is byte-identical to what `npm run tauri:build` produced:
+
+| Binary | md5 build = installed |
+|---|---|
+| `vibedesk.exe` | `b56e9f6299baf0e07fa363338e30ba13` |
+| `swarm-run.exe` | `5bd90931bfc297b30eb290c8087aed2b` |
+| `swarm-mcp.exe` | `5d51b9ee9fbfaebd460b93952822aab0` |
+| `swarm-sim.exe` | `cc9a7d857d91d4d62c7acb09b99b6bb1` |
+| `channel-probe.exe` | `0737af56aacc2c871b9d2ec5e0167056` |
+
+A hash is not a run, so the installed pair was driven through a real run: the
+**installed** `swarm-run.exe` against the **installed** `swarm-sim.exe`, a freshly
+seeded workspace, `--model deepseek --budget-micros 1500000`: `exit=0` in 7 s, 2/2
+verified, reflection written, `released 4 agent processes`. `D:\VibeDesk\swarm-run.exe
+--help` lists `--idle-secs`, so the installed runner is the build that carries the
+liveness fix.
+
+Two mixes were run to show neither binary is the load-bearing half:
+installed runner + debug double (`exit=0`, 7 s) and debug runner + installed
+double (`exit=0`, 8 s).
+
+**A harness trap found on the way**, recorded because it reads as a product
+failure: `swarm-sim` exits quietly when `VIBEDESK_SIM_SCRIPT` names a file it
+cannot read — `unwrap_or_else(|_| json!({ "members": {} }))` — so the run reports
+`the lead did not produce a plan in time` after 180 s with nothing on the board
+that says why. A copy of `scripts/swarm-sim.sh` outside the repo resolves
+`repo="$(cd "$(dirname "$0")/.." && pwd)"` to `/`, which is exactly how it was
+hit. The double should fail loudly on a missing script rather than answer nothing,
+and it now does: `load_script` prints the path and exits 2 on either an unreadable
+file or unparseable JSON, so the trap reports itself in the first second instead of
+surfacing as a planning timeout two minutes later. Verified by running the binary
+against three broken setups rather than by reading the diff:
+
+```
+$ VIBEDESK_SIM_SCRIPT=D:/Temp/no-such-script.json swarm-sim.exe
+sim: cannot read the script at VIBEDESK_SIM_SCRIPT="D:/Temp/no-such-script.json"   exit=2
+$ VIBEDESK_SIM_SCRIPT=D:/Temp/broken-sim.json swarm-sim.exe      # file is "not json at all"
+sim: "D:/Temp/broken-sim.json" is not valid JSON: expected ident at line 1 column 2  exit=2
+$ VIBEDESK_SIM_SCRIPT=D:/Temp/trap/swarm-sim.sh swarm-sim.exe    # the original trap, replayed
+sim: "D:/Temp/trap/swarm-sim.sh" is not valid JSON: expected value at line 1 column 1 exit=2
+```
+
+The end-to-end suite still passes against the strict double — 7/7 in 72.5 s — which
+is the check that matters, because every e2e test drives the sim through this
+function and a double that refused a valid script would fail all seven.
+
 ### Still not done (updated)
 
 - **Money is measured now, on one model only.** `deepseek` is priced; a run on a

@@ -126,10 +126,28 @@ fn main() {
     }
 }
 
+/// The script, or a refusal that names the file.
+///
+/// An empty script used to be the fallback, and it is the worst possible one: the
+/// double then answers every turn with nothing, every member stays silent, and the
+/// run reports "the lead did not produce a plan in time" two minutes later with
+/// nothing anywhere naming the missing file. A `VIBEDESK_SIM_SCRIPT` pointing at a
+/// stale path is a harness mistake, and a harness that fails silently is
+/// indistinguishable from an engine that has stalled — which is exactly what it
+/// was taken for.
 fn load_script() -> Value {
     let path = std::env::var("VIBEDESK_SIM_SCRIPT").unwrap_or_default();
-    let body = std::fs::read_to_string(&path).unwrap_or_default();
-    serde_json::from_str(&body).unwrap_or_else(|_| json!({ "members": {} }))
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        eprintln!("sim: cannot read the script at VIBEDESK_SIM_SCRIPT={path:?}");
+        std::process::exit(2);
+    };
+    match serde_json::from_str(&body) {
+        Ok(script) => script,
+        Err(error) => {
+            eprintln!("sim: {path:?} is not valid JSON: {error}");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// Where the per-member step counters live.
