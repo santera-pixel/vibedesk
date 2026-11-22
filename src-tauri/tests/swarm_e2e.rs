@@ -245,6 +245,7 @@ impl Harness {
                 self.repo.clone(),
                 self.models.clone(),
                 5_000_000,
+                None,
                 2,
             )
             .await
