@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use super::{Task, TaskState, Verdict};
+use super::{Role, Task, TaskState, Verdict};
 
 /// Something the engine must do next.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -401,21 +401,95 @@ pub struct Rehearsal {
     /// spend a run on the second one.
     pub median_task_secs: u64,
     pub measured: bool,
+    /// How many past runs of this workspace the token figures are the median of,
+    /// and `None` when they are the constants.
+    ///
+    /// A projection built on this machine's own history and one built on a guess
+    /// are different claims, and the user is deciding whether to spend a run on
+    /// the second one.
+    pub tokens_measured_from: Option<usize>,
     /// A rough token figure. An estimate, labelled as one.
     pub estimated_tokens: u64,
     /// The same plan run as a single agent, for comparison.
     pub single_agent_tokens: u64,
 }
 
-/// Per-task token estimates. Deliberately round and deliberately labelled.
+/// Per-turn token estimates for a workspace with no history.
 ///
-/// These are not measurements. They are the shape of the cost, so the panel can
-/// say "this is roughly 4× a chat" before the user commits. Phase 6 of the plan
-/// replaces them with the measured figure.
+/// These are not measurements. They are the shape of the cost, and they were the
+/// only figures the rehearsal had — 60,000 for a worker turn, when the audited
+/// run's w-t2 spent 39,151,829 input tokens on one task: a factor of 652 out, and
+/// the scheduler planned eighteen tasks against the smaller number. They survive
+/// only for the first run in a workspace, which has nothing to measure. See
+/// [`Estimates::of`].
 pub const ESTIMATE_WORKER_TOKENS: u64 = 60_000;
 pub const ESTIMATE_VERIFIER_TOKENS: u64 = 25_000;
 pub const ESTIMATE_LEAD_TOKENS: u64 = 40_000;
 pub const ESTIMATE_REFLECTION_TOKENS: u64 = 15_000;
+
+/// What one turn of each role has cost here, or the constants when nothing has
+/// been measured yet.
+///
+/// The audit's fourth fault in one sentence: the rehearsal promised a run of
+/// eighteen tasks on four workers would cost about 45 minutes, and the run
+/// produced one verified artifact in thirty. A cost model that never reads its
+/// own history is not an estimate, it is a slogan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Estimates {
+    pub worker: u64,
+    pub verifier: u64,
+    pub lead: u64,
+    pub reflection: u64,
+    /// How many past runs the figures are the median of, and `None` when they are
+    /// the constants.
+    pub runs: Option<usize>,
+}
+
+impl Default for Estimates {
+    fn default() -> Self {
+        Self {
+            worker: ESTIMATE_WORKER_TOKENS,
+            verifier: ESTIMATE_VERIFIER_TOKENS,
+            lead: ESTIMATE_LEAD_TOKENS,
+            reflection: ESTIMATE_REFLECTION_TOKENS,
+            runs: None,
+        }
+    }
+}
+
+impl Estimates {
+    /// The measured medians where this workspace has them, the constants where it
+    /// does not.
+    ///
+    /// Per role, not per run: the lead, a worker and a verifier spend very
+    /// different amounts, and `history::role_medians` only reports a role it has
+    /// at least two runs for — one observation is not a median. A role without a
+    /// measurement keeps its constant and the rehearsal says the figure is not
+    /// measured, because a mixed estimate presented as a measurement is the same
+    /// mistake as a guess presented as one.
+    pub fn of(history: Option<&super::history::History>) -> Self {
+        let Some(history) = history else {
+            return Self::default();
+        };
+        let mut out = Self::default();
+        let mut observed: Option<usize> = None;
+        for median in history.role_medians() {
+            match median.role {
+                Role::Worker => out.worker = median.turn_tokens,
+                Role::Verifier => out.verifier = median.turn_tokens,
+                Role::Lead => out.lead = median.turn_tokens,
+                Role::Reflector => out.reflection = median.turn_tokens,
+            }
+            // The worker figure is the one that dominates the estimate, so it is
+            // the one that decides whether the total is labelled measured.
+            if median.role == Role::Worker {
+                observed = Some(median.runs);
+            }
+        }
+        out.runs = observed;
+        out
+    }
+}
 
 /// How long one step of a plan is assumed to take, in seconds, when nothing has
 /// been measured.
@@ -483,9 +557,15 @@ pub fn budget_wall_secs(parallel_steps: usize, median_task_secs: u64) -> u64 {
 /// rather than a plain number so the fallback lives in one place: a caller that
 /// passed the constant itself would be a second place the default is decided, and
 /// the review could not tell a measured 600 from an assumed one.
-pub fn rehearse(tasks: &[Task], concurrency: usize, measured: Option<u64>) -> Rehearsal {
+pub fn rehearse(
+    tasks: &[Task],
+    concurrency: usize,
+    history: Option<&super::history::History>,
+) -> Rehearsal {
     let concurrency = concurrency.max(1);
+    let measured = history.and_then(|h| h.median_task_secs());
     let median_task_secs = measured.unwrap_or(DEFAULT_MEDIAN_TASK_SECS);
+    let estimates = Estimates::of(history);
     let mut states: Vec<Task> = tasks.to_vec();
     for task in &mut states {
         task.state = TaskState::Blocked;
@@ -538,15 +618,17 @@ pub fn rehearse(tasks: &[Task], concurrency: usize, measured: Option<u64>) -> Re
     let parallel_steps = waves.len().max(1);
     let speedup = serial_steps as f64 / parallel_steps as f64;
 
-    let per_task = ESTIMATE_WORKER_TOKENS + ESTIMATE_VERIFIER_TOKENS;
-    let estimated_tokens = ESTIMATE_LEAD_TOKENS
-        + ESTIMATE_REFLECTION_TOKENS
-        + per_task.saturating_mul(tasks.len() as u64);
+    let per_task = estimates.worker.saturating_add(estimates.verifier);
+    let estimated_tokens = estimates
+        .lead
+        .saturating_add(estimates.reflection)
+        .saturating_add(per_task.saturating_mul(tasks.len() as u64));
     // A single agent does the same work in one context, so it pays for the work
     // but not for the coordination: roughly one worker-turn per task plus the
     // integration, with no verifier and no re-sends.
-    let single_agent_tokens =
-        ESTIMATE_LEAD_TOKENS + ESTIMATE_WORKER_TOKENS.saturating_mul(tasks.len() as u64);
+    let single_agent_tokens = estimates
+        .lead
+        .saturating_add(estimates.worker.saturating_mul(tasks.len() as u64));
 
     Rehearsal {
         waves,
@@ -559,6 +641,7 @@ pub fn rehearse(tasks: &[Task], concurrency: usize, measured: Option<u64>) -> Re
         budget_wall_secs: budget_wall_secs(parallel_steps, median_task_secs),
         median_task_secs,
         measured: measured.is_some(),
+        tokens_measured_from: estimates.runs,
         estimated_tokens,
         single_agent_tokens,
     }
@@ -1287,6 +1370,76 @@ mod tests {
         assert!(projected_wall_secs(5, assumed) < MIN_WALL_SECS);
     }
 
+    /// Two past runs of one workspace whose tasks each took `secs` seconds.
+    ///
+    /// Two, because `History::role_medians` refuses to report a median from one
+    /// observation, and the rehearsal must not present an anecdote as a
+    /// measurement.
+    fn measured_history(secs: u64) -> super::super::history::History {
+        let mut runs = Vec::new();
+        for id in ["r1", "r2"] {
+            let mut run = super::super::Run::new(
+                "goal",
+                "/ws",
+                super::super::Member::new("lead", Role::Lead, "mistral-large"),
+            );
+            run.id = id.to_string();
+            run.state = super::super::RunState::Done;
+            // The record the history reads is `role_usage`, stamped when a run
+            // stops — not the roster, which is live and gone by then.
+            run.role_usage.push(super::super::RoleUsage {
+                role: Role::Worker,
+                turns: 1,
+                secs: secs as f64,
+                tokens_in: 39_000_000,
+                tokens_out: 1_000_000,
+            });
+            let mut task = super::Task::new("t1", "One", "Do it", "node --test a.test.js");
+            task.started_at = Some("2026-01-01T00:00:00.000Z".into());
+            task.ended_at = Some(
+                (chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+                    .unwrap()
+                    + chrono::Duration::seconds(secs as i64))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            );
+            run.tasks.push(task);
+            runs.push(run);
+        }
+        super::super::history::History::from_runs(runs, "/ws", None)
+    }
+
+    /// The token estimate follows this workspace's own history, and says so.
+    ///
+    /// The constants promised 85,000 tokens for one task — a worker turn and a
+    /// verifier turn — when a worker turn on this machine cost 40M. The rehearsal
+    /// is what the user decides on, so it is the number that has to be measured.
+    #[test]
+    fn the_token_estimate_follows_the_measured_worker_turn() {
+        let tasks = vec![task("t1", &[]), task("t2", &["t1"])];
+        let assumed = rehearse(&tasks, 2, None);
+        assert_eq!(assumed.tokens_measured_from, None, "a guess says it is one");
+        assert_eq!(
+            assumed.estimated_tokens,
+            ESTIMATE_LEAD_TOKENS
+                + ESTIMATE_REFLECTION_TOKENS
+                + (ESTIMATE_WORKER_TOKENS + ESTIMATE_VERIFIER_TOKENS) * 2
+        );
+
+        let history = measured_history(1620);
+        let measured = rehearse(&tasks, 2, Some(&history));
+        assert_eq!(measured.tokens_measured_from, Some(2));
+        // The worker's turn was 40M tokens a turn, so two tasks cost far more than
+        // the constant claimed — and the verifier has no measurement, so it keeps
+        // its constant rather than borrowing the worker's.
+        assert_eq!(
+            measured.estimated_tokens,
+            ESTIMATE_LEAD_TOKENS
+                + ESTIMATE_REFLECTION_TOKENS
+                + (40_000_000 + ESTIMATE_VERIFIER_TOKENS) * 2
+        );
+        assert!(measured.estimated_tokens > assumed.estimated_tokens * 100);
+    }
+
     /// The fourth proof of Phase 15: the derived budget moves when the median
     /// moves.
     ///
@@ -1318,7 +1471,8 @@ mod tests {
             task("t5", &["t4"]),
         ];
         let on_the_constant = rehearse(&tasks, 4, None);
-        let on_the_measurement = rehearse(&tasks, 4, Some(measured));
+        let measured_history = measured_history(measured);
+        let on_the_measurement = rehearse(&tasks, 4, Some(&measured_history));
         assert_eq!(on_the_constant.parallel_steps, on_the_measurement.parallel_steps);
         assert_eq!(on_the_constant.budget_wall_secs, 6000);
         assert_eq!(on_the_measurement.budget_wall_secs, 16200);

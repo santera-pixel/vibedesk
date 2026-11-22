@@ -642,7 +642,7 @@ impl Engine {
         let violations = plan::validate(plan).err().unwrap_or_default();
         let shape = plan::shape(plan);
         let useful = schedule::useful_concurrency(&plan.tasks, concurrency);
-        let rehearsal = schedule::rehearse(&plan.tasks, useful, history.median_task_secs());
+        let rehearsal = schedule::rehearse(&plan.tasks, useful, Some(&history));
 
         RehearsalView {
             violations: violations.iter().map(|v| ViolationView::from(v)).collect(),
@@ -965,11 +965,11 @@ impl Engine {
             }
         }
 
-        // What this workspace's own runs cost per task, so the clock the run is
-        // given is a measurement rather than the constant Phase 13 shipped.
-        let measured = history::History::of(&run.workspace, Some(run.id.as_str()))
-            .median_task_secs();
-        run = start_running(&run, &plan, &base, concurrency, measured);
+        // What this workspace's own runs cost per task, and per role, so the clock
+        // and the token estimate the run is given are measurements rather than the
+        // constants Phase 13 shipped.
+        let history = history::History::of(&run.workspace, Some(run.id.as_str()));
+        run = start_running(&run, &plan, &base, concurrency, Some(&history));
 
         // The skills the plan authored, written now that the plan is accepted.
         // The catalogue the gate saw already held them; this is the file they
@@ -6193,7 +6193,7 @@ fn start_running(
     plan: &Plan,
     base: &str,
     concurrency: usize,
-    measured: Option<u64>,
+    history: Option<&history::History>,
 ) -> Run {
     let mut next = run.clone();
     next.tasks = plan.tasks.clone();
@@ -6211,7 +6211,7 @@ fn start_running(
     // The rehearsal at the concurrency the run will actually use, so the budget
     // describes this run rather than the plan's best case. A run given two
     // workers takes more steps than one given six, and its clock has to say so.
-    let rehearsal = schedule::rehearse(&next.tasks, next.concurrency, measured);
+    let rehearsal = schedule::rehearse(&next.tasks, next.concurrency, history);
     next.budget.max_wall_secs = rehearsal.budget_wall_secs;
     next.shape_warnings = plan::shape_warnings(plan);
     next.state = RunState::Running;
@@ -11498,7 +11498,7 @@ name: a");
         let history = history::History::from_runs(vec![first, second], "/ws", Some("r3"));
         assert_eq!(history.median_task_secs(), Some(measured));
 
-        let review = engine.rehearse_with(&plan, 4, history);
+        let review = engine.rehearse_with(&plan, 4, history.clone());
         assert!(review.rehearsal.measured, "a measurement says so");
         assert_eq!(review.rehearsal.median_task_secs, measured);
         assert_eq!(review.rehearsal.budget_wall_secs, 16200);
@@ -11509,7 +11509,7 @@ name: a");
 
         // And the approval sets the same number the review promised.
         let run = Run::new("g", "/ws", Member::new("lead", Role::Lead, "m"));
-        let running = start_running(&run, &plan, "abc123", 4, Some(measured));
+        let running = start_running(&run, &plan, "abc123", 4, Some(&history));
         assert_eq!(
             running.budget.max_wall_secs,
             review.rehearsal.budget_wall_secs
