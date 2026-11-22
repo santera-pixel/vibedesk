@@ -1359,6 +1359,15 @@ impl Engine {
  * Preconditions
  * ------------------------------------------------------------------ */
 
+/// Make the workspace git-ready for a run: `git init` when the folder is not
+/// inside a repository, and an empty root commit when there is no HEAD to base
+/// worktrees on. The user's files are never staged or committed. Called before
+/// the gate at every start, so a folder becomes a repository instead of
+/// refusing the run; a failure here surfaces as the repository precondition.
+pub fn prepare_workspace(workspace: &Path) -> Result<worktree::RepoPrep, String> {
+    worktree::ensure_repo(&CommandGit, workspace)
+}
+
 /// Everything that must be true before a run may start.
 ///
 /// Computed when the panel opens, not discovered at run start: a refusal is only
@@ -1421,17 +1430,25 @@ pub fn preconditions_with(
         ));
     }
 
-    // 3. A git repository, for any task that writes.
+    // 3. A git repository with a root commit, for any task that writes.
+    //    A folder that is not one is not a dead end: [`prepare_workspace`]
+    //    makes it one when a run starts, so the detail says what will happen.
     match workspace {
         Some(path) if path.is_dir() => {
-            if worktree::is_repo(&CommandGit, path) {
-                out.push(Precondition::ready("repository", "A git repository"));
-            } else {
+            if !worktree::is_repo(&CommandGit, path) {
                 out.push(Precondition::blocked(
                     "repository",
                     "A git repository",
-                    "this folder is not a git repository — the swarm isolates workers in worktrees",
+                    "not a git repository yet — starting a run runs git init here and adds an empty root commit (your files are never staged or committed)",
                 ));
+            } else if worktree::head(&CommandGit, path).is_err() {
+                out.push(Precondition::blocked(
+                    "repository",
+                    "A git repository",
+                    "this repository has no commits yet — starting a run adds an empty root commit, the base worktrees are created from",
+                ));
+            } else {
+                out.push(Precondition::ready("repository", "A git repository"));
             }
         }
         Some(path) => out.push(Precondition::blocked(

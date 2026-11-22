@@ -249,6 +249,64 @@ pub fn head(git: &dyn Git, repo: &Path) -> Result<String, String> {
         .map(|out| out.trim().to_string())
 }
 
+/// What [`ensure_repo`] did to make a folder git-ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoPrep {
+    /// Already a repository with a root commit; nothing was done.
+    Ready,
+    /// `git init` was run.
+    Initialized,
+    /// `git init` ran and an empty root commit was added.
+    InitializedWithRootCommit,
+    /// The repository existed but had no commits; an empty root commit was added.
+    RootCommitAdded,
+}
+
+impl RepoPrep {
+    pub fn describe(self) -> &'static str {
+        match self {
+            RepoPrep::Ready => "already a git repository",
+            RepoPrep::Initialized => "ran git init",
+            RepoPrep::InitializedWithRootCommit => "ran git init and added an empty root commit",
+            RepoPrep::RootCommitAdded => "added an empty root commit to the existing repository",
+        }
+    }
+}
+
+/// Make a folder usable as a swarm workspace: `git init` when it is not inside
+/// a repository, and an empty root commit when there is no HEAD to base
+/// worktrees on. Never stages or commits the user's files — an empty commit is
+/// all a worktree needs, and the identity is passed with `-c` so a machine with
+/// no git config still works.
+pub fn ensure_repo(git: &dyn Git, repo: &Path) -> Result<RepoPrep, String> {
+    const ROOT_COMMIT: &[&str] = &[
+        "-c",
+        "user.name=VibeDesk",
+        "-c",
+        "user.email=vibedesk@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "vibedesk: root commit so swarm worktrees have a base",
+    ];
+    if !is_repo(git, repo) {
+        git.run(&["init"], repo)
+            .map_err(|error| format!("git init failed: {error}"))?;
+        if head(git, repo).is_ok() {
+            return Ok(RepoPrep::Initialized);
+        }
+        git.run(ROOT_COMMIT, repo)
+            .map_err(|error| format!("could not create a root commit: {error}"))?;
+        return Ok(RepoPrep::InitializedWithRootCommit);
+    }
+    if head(git, repo).is_err() {
+        git.run(ROOT_COMMIT, repo)
+            .map_err(|error| format!("could not create a root commit: {error}"))?;
+        return Ok(RepoPrep::RootCommitAdded);
+    }
+    Ok(RepoPrep::Ready)
+}
+
 /// The commit a ref points at.
 ///
 /// A branch name resolves to its tip, which is what a dependency contributed to
@@ -701,6 +759,65 @@ mod tests {
         let bare = FakeGit::new();
         bare.on("rev-parse --git-dir", Err("not a git repository"));
         assert!(!is_repo(&bare, &repo()));
+    }
+
+    #[test]
+    fn ensure_repo_leaves_a_ready_repository_alone() {
+        let git = FakeGit::new();
+        git.on("rev-parse --git-dir", Ok(".git"));
+        git.on("rev-parse HEAD", Ok("abc123"));
+        assert_eq!(ensure_repo(&git, &repo()).unwrap(), RepoPrep::Ready);
+        let calls = git.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("init")), "{calls:?}");
+        assert!(!calls.iter().any(|c| c.contains("commit")), "{calls:?}");
+    }
+
+    #[test]
+    fn ensure_repo_inits_a_plain_folder_and_adds_an_empty_root_commit() {
+        let git = FakeGit::new();
+        git.on("rev-parse --git-dir", Err("not a git repository"));
+        git.on("init", Ok("Initialized empty Git repository"));
+        git.on("rev-parse HEAD", Err("ambiguous argument 'HEAD'"));
+        git.on("-c user.name=VibeDesk", Ok("[main (root-commit) def456] vibedesk"));
+        assert_eq!(
+            ensure_repo(&git, &repo()).unwrap(),
+            RepoPrep::InitializedWithRootCommit
+        );
+        let calls = git.calls();
+        assert!(calls.iter().any(|c| c == "init"), "{calls:?}");
+        let commit = calls
+            .iter()
+            .find(|c| c.contains("commit"))
+            .expect("an empty root commit");
+        assert!(commit.contains("--allow-empty"), "{commit}");
+        assert!(commit.contains("-c user.name="), "{commit}");
+    }
+
+    #[test]
+    fn ensure_repo_adds_a_root_commit_to_a_repository_without_commits() {
+        let git = FakeGit::new();
+        git.on("rev-parse --git-dir", Ok(".git"));
+        git.on("rev-parse HEAD", Err("ambiguous argument 'HEAD'"));
+        git.on("-c user.name=VibeDesk", Ok("[main (root-commit) def456] vibedesk"));
+        assert_eq!(
+            ensure_repo(&git, &repo()).unwrap(),
+            RepoPrep::RootCommitAdded
+        );
+        let calls = git.calls();
+        assert!(!calls.iter().any(|c| c == "init"), "{calls:?}");
+        assert!(calls.iter().any(|c| c.contains("--allow-empty")), "{calls:?}");
+    }
+
+    #[test]
+    fn ensure_repo_reports_a_failed_init_and_never_commits_user_files() {
+        let git = FakeGit::new();
+        git.on("rev-parse --git-dir", Err("not a git repository"));
+        git.on("init", Err("permission denied"));
+        let error = ensure_repo(&git, &repo()).unwrap_err();
+        assert!(error.contains("git init failed"), "{error}");
+        let calls = git.calls();
+        assert!(!calls.iter().any(|c| c.contains("commit")), "{calls:?}");
+        assert!(!calls.iter().any(|c| c.contains("add")), "{calls:?}");
     }
 
     #[test]

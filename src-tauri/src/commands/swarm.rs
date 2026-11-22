@@ -94,6 +94,11 @@ pub async fn swarm_start(
         .await
         .ok_or_else(|| AppError::message("no workspace is open"))?;
 
+    // A swarm isolates workers in git worktrees, so the workspace is made
+    // git-ready here instead of refused: git init plus an empty root commit
+    // when needed, never staging or committing the user's files.
+    let _ = engine::prepare_workspace(&cwd);
+
     // The gate is checked here as well as in the panel. The panel is a view, and
     // a view must not be able to start a run the gate would refuse.
     let catalog = resolve_catalog(Some(&cwd), catalog);
@@ -390,6 +395,10 @@ async fn answer(app: &tauri::AppHandle, command: crate::swarm::commands::Command
             } else {
                 std::path::PathBuf::from(command.workspace.trim())
             };
+
+            // Same as the panel: make the workspace git-ready first, so the
+            // folder becomes a repository instead of refusing the run.
+            let _ = engine::prepare_workspace(&cwd);
 
             // The same gate the panel and the command line go through. A run that
             // cannot start should say why here, not fail halfway through planning.

@@ -93,13 +93,16 @@ without relearning those lessons the hard way.
 
 ## The swarm
 
-Type `/swarm` inside any git repository and VibeDesk runs a whole team of agents
-on it. A lead agent writes the plan, worker agents implement the tasks in
-isolated git worktrees so they cannot trample each other, and verifier agents
-actively try to break what the workers produced. The engine then merges the
-verified branches in dependency order. Every decision, verdict and permission
-request is written to an append-only board that the Swarm panel shows live, with
-per-run budgets, so you can see exactly what happened and why.
+Type `/swarm` inside any folder and VibeDesk runs a whole team of agents on it.
+If the folder is not a git repository yet, starting the swarm makes it one:
+VibeDesk runs `git init` and adds an empty root commit, because workers run in
+isolated git worktrees — your files are never staged or committed for you. A
+lead agent writes the plan, worker agents implement the tasks in those
+worktrees so they cannot trample each other, and verifier agents actively try
+to break what the workers produced. The engine then merges the verified
+branches in dependency order. Every decision, verdict and permission request is
+written to an append-only board that the Swarm panel shows live, with per-run
+budgets, so you can see exactly what happened and why.
 
 ![Swarm panel](docs/screenshots/05-swarm.png)
 

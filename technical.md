@@ -1119,8 +1119,14 @@ does not blur the textarea before the click lands.
 
 ## The swarm
 
-`/swarm <goal>` in a chat inside a git repository starts a run; `/swarm` with no
-goal opens the Swarm panel. A run is a team of real ACP sessions, not routered
+`/swarm <goal>` in a chat starts a run; `/swarm` with no goal opens the Swarm
+panel. The workspace does not have to be a git repository up front: every start
+gate calls `engine::prepare_workspace`, which runs `worktree::ensure_repo` —
+`git init` when the folder is not inside a repository, plus an empty root
+commit (`--allow-empty`, identity passed with `-c` so no git config is needed)
+when there is no HEAD to base worktrees on. The user's files are never staged
+or committed; the refusal path only remains for a folder that cannot be made
+a repository at all. A run is a team of real ACP sessions, not routered
 subprocesses: because ACP exposes no subagent observability, every member is a
 full `vibe-acp` session with its own worktree, transcript and model, so it shows
 up in the roster and can be talked to. The engine (`src-tauri/src/swarm/engine.rs`)
