@@ -708,6 +708,33 @@ pub fn changed_paths(git: &dyn Git, path: &Path, base: &str) -> Result<Vec<Strin
     Ok(seen)
 }
 
+/// How many non-merge commits a branch holds since `base`.
+///
+/// The number that separates "working" from "produced nothing". Merge commits are
+/// excluded because `prepare_worker` merges the dependency branches into the
+/// task's own, and those are not the worker's work.
+pub fn commit_count(git: &dyn Git, path: &Path, base: &str) -> Result<u32, String> {
+    let range = format!("{base}..HEAD");
+    let out = git.run(&["rev-list", "--count", "--no-merges", &range], path)?;
+    out.trim()
+        .parse::<u32>()
+        .map_err(|error| format!("git reported {out:?} commits: {error}"))
+}
+
+/// When the branch's last commit was written, as an RFC 3339 stamp.
+///
+/// Author date rather than committer date: a rebase rewrites the second, and the
+/// question this answers is when the worker did the work.
+pub fn last_commit_at(git: &dyn Git, path: &Path, base: &str) -> Result<String, String> {
+    let range = format!("{base}..HEAD");
+    let out = git.run(&["log", "-1", "--no-merges", "--format=%aI", &range], path)?;
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        return Err("the branch holds no commits".into());
+    }
+    Ok(out)
+}
+
 /// The paths a worker committed that the plan did not grant it.
 ///
 /// Pure, so the rule is testable without a repository. A grant is a promise the
@@ -1183,6 +1210,50 @@ mod tests {
         git_in(&repo, &["add", "-A"]);
         git_in(&repo, &["commit", "-qm", "base"]);
         repo
+    }
+
+    /// A branch that has committed nothing counts zero, and its last commit can
+    /// be dated.
+    ///
+    /// This is the difference the audited run could not see: five of eight
+    /// worktrees held README.md and .git after thirty minutes while the board said
+    /// `working`. `rev-list --count base..HEAD` is zero for that, and one or more
+    /// for a worker that has committed something.
+    #[test]
+    fn commits_ahead_of_base_are_counted_and_dated() {
+        let repo = real_repo("progress");
+        let git = CommandGit;
+        let base = git_in(&repo, &["rev-parse", "HEAD"]);
+
+        // Nothing on top of base: zero commits, and no date to report.
+        assert_eq!(commit_count(&git, &repo, &base).unwrap(), 0);
+        assert!(last_commit_at(&git, &repo, &base).is_err());
+
+        // Two commits with dates set apart, so "the last one" is identifiable
+        // rather than whatever the clock happened to say.
+        std::fs::write(repo.join("a.txt"), "a
+").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(
+            &repo,
+            &["commit", "-qm", "one", "--date", "2001-02-03T04:05:06+00:00"],
+        );
+        assert_eq!(commit_count(&git, &repo, &base).unwrap(), 1);
+
+        std::fs::write(repo.join("b.txt"), "b
+").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(
+            &repo,
+            &["commit", "-qm", "two", "--date", "2002-03-04T05:06:07+00:00"],
+        );
+        assert_eq!(commit_count(&git, &repo, &base).unwrap(), 2);
+        assert_eq!(
+            last_commit_at(&git, &repo, &base).unwrap(),
+            // git prints a UTC author date as `Z`, not `+00:00`.
+            "2002-03-04T05:06:07Z",
+            "the date is the latest commit's, not the first"
+        );
     }
 
     #[test]

@@ -264,6 +264,14 @@ fn describe(run: &Run) -> Value {
                 "owner": task.owner,
                 "attempts": task.attempts,
                 "deps": task.deps,
+                // What the task has actually produced, as opposed to what it
+                // reports. `stalled` is set when the branch tip is still the commit
+                // it started from long after it started, which is the state the
+                // audited run could not distinguish from `working`.
+                "filesChanged": task.files_changed,
+                "commits": task.commits,
+                "lastCommitAt": task.last_commit_at,
+                "stalled": task.stalled,
                 "verdict": task.verdict.as_ref().map(|verdict| json!({
                     "passed": verdict.passed,
                     "reason": verdict.reason,

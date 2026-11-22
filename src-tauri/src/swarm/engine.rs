@@ -57,6 +57,16 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// treats it as wedged.
 const MEMBER_IDLE_LIMIT_SECS: i64 = 600;
 
+/// How long a worker may work without producing a commit before the run says so.
+///
+/// Twenty minutes, because a worker is not silent while it is writing — the idle
+/// limit does not see it — and the audited run's workers sat `working` for thirty
+/// minutes holding nothing but `README.md` and `.git`. This is a report, not a
+/// kill: the engine posts one note per task and leaves the decision to the user,
+/// because a slow worker that is about to commit and a stuck one look identical
+/// from here and only one of them is worth interrupting.
+const STALL_SECS: i64 = 1200;
+
 /// The reflection pass's member id.
 ///
 /// One per run, and named rather than generated: the pass is a stage of the run,
@@ -3285,9 +3295,37 @@ fn sync_skill_loads(sink: &Arc<dyn EventSink>, run: Run) -> Run {
     next
 }
 
+/// How long a task has been running, and `None` before it started.
+fn task_age_secs(task: &Task) -> Option<i64> {
+    let started = task.started_at.as_deref()?;
+    let at = chrono::DateTime::parse_from_rfc3339(started).ok()?;
+    Some((chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds())
+}
+
+/// How long a running task has gone without a commit, if that is worth reporting.
+///
+/// `head` is the branch tip read this tick. A task whose tip is still the base it
+/// started from holds no commits, so twenty minutes of silence there is not a
+/// slow model — it is no work. `None` means "nothing to say": not running, already
+/// reported, the head moved, or still inside `STALL_SECS`.
+fn stalled_secs(task: &Task, head: &str) -> Option<i64> {
+    if task.stalled || task.state != TaskState::Running {
+        return None;
+    }
+    if task.base_commit.as_deref() != Some(head) {
+        return None;
+    }
+    let age = task_age_secs(task)?;
+    (age >= STALL_SECS).then_some(age)
+}
+
 fn refresh_progress(sink: &Arc<dyn EventSink>, run: Run) -> Run {
     let mut next = run.clone();
     let mut rescued: Vec<(String, String)> = Vec::new();
+    // Every head this tick read, with the task its member is on. Collected rather
+    // than acted on inside the loop: the stall rule has to read the task, and the
+    // loop holds the roster mutably.
+    let mut probed: Vec<(String, String, Option<String>)> = Vec::new();
     for member in std::iter::once(&mut next.lead).chain(next.members.iter_mut()) {
         if member.state != MemberState::Working {
             continue;
@@ -3311,12 +3349,32 @@ fn refresh_progress(sink: &Arc<dyn EventSink>, run: Run) -> Run {
         member.head_at = Some(now());
         let moved = member.head.as_deref().is_some_and(|seen| seen != head);
         member.head = Some(head.clone());
+        probed.push((member.id.clone(), head.clone(), member.task.clone()));
         if moved {
             member.last_at = Some(now());
             rescued.push((member.id.clone(), head));
         }
     }
-    if rescued.is_empty() {
+
+    // A worker whose branch tip is still the base it started from, twenty minutes
+    // in, has committed nothing. That is the case the audited run could not see:
+    // five of eight worktrees held README.md and .git while reporting `working`.
+    // Reported once per task, and not acted on — a worker about to commit and a
+    // worker that is stuck look the same from here.
+    let mut stalled: Vec<(String, String, i64)> = Vec::new();
+    for (member_id, head, task_id) in probed {
+        let Some(task_id) = task_id else { continue };
+        let Some(task) = next.task(&task_id) else { continue };
+        let Some(age) = stalled_secs(task, &head) else {
+            continue;
+        };
+        if let Some(task) = next.task_mut(&task_id) {
+            task.stalled = true;
+        }
+        stalled.push((member_id, task_id, age));
+    }
+
+    if rescued.is_empty() && stalled.is_empty() {
         return run;
     }
     next.touch();
@@ -3332,6 +3390,18 @@ fn refresh_progress(sink: &Arc<dyn EventSink>, run: Run) -> Run {
                 format!("{id} committed {short} — working, not silent"),
             )
             .about("run"),
+        );
+    }
+    for (member_id, task_id, age) in stalled {
+        engine().post(
+            BoardEntry::new(
+                "engine",
+                BoardKind::Conflict,
+                format!(
+                    "{member_id} has committed nothing on {task_id} in {age}s — its branch is still the commit it started from"
+                ),
+            )
+            .about(task_id),
         );
     }
     next
@@ -4605,11 +4675,30 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                     let path = worktree::worktree_path(&next.id, &format!("w-{task_id}"));
                     worktree::head(&CommandGit, &path).ok()
                 };
+                // What the branch actually holds, recorded where the engine is
+                // already reading it. `state: working` said nothing about
+                // progress in the audited run: five of eight worktrees held two
+                // files and one commit after thirty minutes, and the only way to
+                // find out was to open them by hand.
+                let (commits, last_commit) = {
+                    let path = worktree::worktree_path(&next.id, &format!("w-{task_id}"));
+                    let base = task
+                        .base_commit
+                        .clone()
+                        .unwrap_or_else(|| next.integration.base.clone());
+                    (
+                        worktree::commit_count(&CommandGit, &path, &base).unwrap_or(0),
+                        worktree::last_commit_at(&CommandGit, &path, &base).ok(),
+                    )
+                };
                 if let Some(task) = next.task_mut(task_id) {
                     task.state = TaskState::Verifying;
                     task.verifier = Some(format!("v-{task_id}"));
                     task.out_of_grant = out_of_grant;
                     task.verified_commit = judged;
+                    task.files_changed = committed.len();
+                    task.commits = commits;
+                    task.last_commit_at = last_commit;
                 }
                 // The worker's job is over. Its brief says to stop after posting
                 // evidence, but a model with momentum keeps going: the first live
@@ -6750,6 +6839,55 @@ fn unreachable_from(declared: &[String]) -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::swarm::{Integration, Reflection, Task};
+
+    /// Twenty minutes without a commit is `stalled`, not `slow`.
+    ///
+    /// The audited run reported `working` for five worktrees that held README.md
+    /// and .git after thirty minutes, so the status payload could not tell a slow
+    /// worker from an idle one. Every row below is a case that run produced, or a
+    /// case that would have hidden the finding.
+    #[test]
+    fn twenty_minutes_without_a_commit_is_reported_as_stalled_not_slow() {
+        let head = "a".repeat(40);
+        let task = |age: i64| {
+            let mut task = Task::new("t1", "t", "d", "a");
+            task.state = TaskState::Running;
+            task.base_commit = Some(head.clone());
+            task.started_at = Some(
+                (chrono::Utc::now() - chrono::Duration::seconds(age))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            );
+            task
+        };
+
+        // A worker past the threshold with its branch still at base: report it,
+        // and report how long it has actually been silent.
+        let age = stalled_secs(&task(STALL_SECS + 60), &head).expect("stalled");
+        assert!((age - (STALL_SECS + 60)).abs() <= 2, "reported {age}s");
+
+        // Inside the threshold it is still just working.
+        assert!(stalled_secs(&task(60), &head).is_none());
+        assert!(stalled_secs(&task(STALL_SECS - 1), &head).is_none());
+
+        // One commit moves the tip off base, and one commit is work: a task that
+        // is slow but committing is never called stalled.
+        assert!(stalled_secs(&task(STALL_SECS * 3), &"b".repeat(40)).is_none());
+
+        // Reported once. A second tick does not repeat the note.
+        let mut reported = task(STALL_SECS * 2);
+        reported.stalled = true;
+        assert!(stalled_secs(&reported, &head).is_none());
+
+        // A task that never started has no age to be silent for.
+        let mut unstarted = task(0);
+        unstarted.started_at = None;
+        assert!(stalled_secs(&unstarted, &head).is_none());
+
+        // A verified task is not running, whatever its branch tip says.
+        let mut verified = task(STALL_SECS * 2);
+        verified.state = TaskState::Verified;
+        assert!(stalled_secs(&verified, &head).is_none());
+    }
 
     /// The report that failed the audited run and could never have passed.
     ///

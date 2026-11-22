@@ -504,6 +504,26 @@ pub struct Task {
     /// unstartable. The verifier reads this list and fails the change for it.
     #[serde(default)]
     pub out_of_grant: Vec<String>,
+    /// What the branch actually holds, recorded when the worker handed it over.
+    ///
+    /// `state: working` is not evidence of progress. The audited run's eight
+    /// worktrees reported `working` for thirty minutes while five of them held
+    /// nothing but `README.md` and `.git`, and the only way to tell was to open
+    /// them by hand afterwards.
+    #[serde(default)]
+    pub files_changed: usize,
+    /// Non-merge commits the worker made on its own branch.
+    #[serde(default)]
+    pub commits: u32,
+    /// When the last of those commits was written.
+    #[serde(default)]
+    pub last_commit_at: Option<String>,
+    /// Whether the engine has already said this task is stalled.
+    ///
+    /// One note per task, not one per tick: a run that posted a warning every
+    /// 400ms would bury the board it is trying to explain.
+    #[serde(default)]
+    pub stalled: bool,
     /// Files this task owns that its dependencies disagreed about.
     ///
     /// The engine resolved the merge in favour of the incoming dependency, so
@@ -564,6 +584,10 @@ impl Task {
             conflict: None,
             conflict_repairs: 0,
             out_of_grant: Vec::new(),
+            files_changed: 0,
+            commits: 0,
+            last_commit_at: None,
+            stalled: false,
             reconcile: Vec::new(),
             skills: Vec::new(),
             built_on: BTreeMap::new(),
