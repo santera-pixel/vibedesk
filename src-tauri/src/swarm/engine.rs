@@ -11580,6 +11580,7 @@ name: a");
                     secs: 360.0,
                     tokens_in: 60_000,
                     tokens_out: 0,
+                    cached: 0,
                 },
                 crate::swarm::RoleUsage {
                     role: Role::Verifier,
@@ -11587,6 +11588,7 @@ name: a");
                     secs: verifier_secs,
                     tokens_in: 25_000,
                     tokens_out: 0,
+                    cached: 0,
                 },
             ];
             run
@@ -11623,7 +11625,7 @@ name: a");
             .expect("the verifier's turn is the number the user is choosing");
         assert_eq!(verifier.runs, 2);
         assert_eq!(verifier.turn_secs, 801, "the middle of 360 and 1242");
-        assert_eq!(verifier.turn_tokens, 25_000);
+        assert_eq!(verifier.fresh_tokens, 25_000);
 
         let worker = two
             .role_medians

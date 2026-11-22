@@ -775,6 +775,18 @@ pub struct RoleUsage {
     pub secs: f64,
     pub tokens_in: u64,
     pub tokens_out: u64,
+    /// Input tokens the provider served from its prompt cache, a subset of
+    /// `tokens_in`.
+    ///
+    /// Recorded because it is the difference between the number the budget is
+    /// charged for and the number a turn moved through the context window: the
+    /// audited run's worker reported 39,151,829 input tokens of which 38,344,704
+    /// were cache reads, so a median of `tokens_in` would plan the next run at
+    /// 94.7% noise. Runs recorded before this field existed read as zero cached
+    /// and are therefore indistinguishable from uncached ones; that is a floor on
+    /// the fresh figure, not a claim that nothing was cached.
+    #[serde(default)]
+    pub cached: u64,
 }
 
 impl RoleUsage {
@@ -790,13 +802,36 @@ impl RoleUsage {
         Some((self.secs / self.turns as f64).round().max(0.0) as u64)
     }
 
-    /// Tokens one turn of this role cost, in and out.
+    /// Tokens one turn of this role moved, in and out, cache reads included.
+    ///
+    /// Diagnostics only. This is the figure the audited run's status payload
+    /// showed as if it were spend, and 94.7% of it was a cache hit.
     pub fn turn_tokens(&self) -> Option<u64> {
         if self.turns == 0 {
             return None;
         }
         Some(
             self.tokens_in
+                .saturating_add(self.tokens_out)
+                .saturating_div(self.turns as u64),
+        )
+    }
+
+    /// Tokens one turn of this role was charged for, in and out.
+    ///
+    /// Cache reads are subtracted because they are a subset of `tokens_in` and
+    /// bill at a fraction of it. This is the figure a next-run estimate is
+    /// derived from: a plan built on [`Self::turn_tokens`] would forecast the
+    /// cache hit, not the work.
+    pub fn turn_fresh_tokens(&self) -> Option<u64> {
+        if self.turns == 0 {
+            return None;
+        }
+        let fresh = self
+            .tokens_in
+            .saturating_sub(self.cached.min(self.tokens_in));
+        Some(
+            fresh
                 .saturating_add(self.tokens_out)
                 .saturating_div(self.turns as u64),
         )
@@ -1680,6 +1715,7 @@ impl Run {
                 secs: 0.0,
                 tokens_in: 0,
                 tokens_out: 0,
+                cached: 0,
             };
             let mut any = false;
             for member in self.roster().filter(|member| member.role == role) {
@@ -1693,6 +1729,7 @@ impl Run {
                 usage.secs += member.active_secs;
                 usage.tokens_in = usage.tokens_in.saturating_add(member.tokens_in);
                 usage.tokens_out = usage.tokens_out.saturating_add(member.tokens_out);
+                usage.cached = usage.cached.saturating_add(member.cached_tokens);
             }
             if any {
                 out.push(usage);

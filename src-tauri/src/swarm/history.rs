@@ -176,29 +176,35 @@ impl History {
         let mut out = Vec::new();
         for role in [Role::Lead, Role::Worker, Role::Verifier, Role::Reflector] {
             let mut turn_secs: Vec<u64> = Vec::new();
-            let mut turn_tokens: Vec<u64> = Vec::new();
+            let mut fresh_tokens: Vec<u64> = Vec::new();
             for run in &self.runs {
                 let Some(usage) = run.role_usage.iter().find(|u| u.role == role) else {
                     continue;
                 };
-                let (Some(secs), Some(tokens)) = (usage.turn_secs(), usage.turn_tokens()) else {
+                // `turn_fresh_tokens`, not `turn_tokens`: the audited run's worker
+                // turn moved 8.4 million tokens of context to be charged for
+                // 900 thousand, so a median of the former would plan the next run
+                // at 94.7% cache noise.
+                let (Some(secs), Some(tokens)) =
+                    (usage.turn_secs(), usage.turn_fresh_tokens())
+                else {
                     continue;
                 };
                 turn_secs.push(secs);
-                turn_tokens.push(tokens);
+                fresh_tokens.push(tokens);
             }
             if turn_secs.len() < 2 {
                 continue;
             }
             let runs = turn_secs.len();
-            let (Some(secs), Some(tokens)) = (median(&mut turn_secs), median(&mut turn_tokens))
+            let (Some(secs), Some(tokens)) = (median(&mut turn_secs), median(&mut fresh_tokens))
             else {
                 continue;
             };
             out.push(RoleMedian {
                 role,
                 turn_secs: secs,
-                turn_tokens: tokens,
+                fresh_tokens: tokens,
                 runs,
             });
         }
@@ -294,8 +300,12 @@ pub struct RoleMedian {
     pub role: Role,
     /// Median seconds one turn of this role took.
     pub turn_secs: u64,
-    /// Median tokens one turn of this role cost, in and out.
-    pub turn_tokens: u64,
+    /// Median tokens one turn of this role was charged for, in and out.
+    ///
+    /// Cache reads are excluded: they are a subset of input billed at a fraction
+    /// of it, so including them measures the provider's cache hit rate rather
+    /// than the work.
+    pub fresh_tokens: u64,
     /// How many runs contributed. Never below two — see [`History::role_medians`].
     pub runs: usize,
 }
@@ -595,6 +605,7 @@ mod tests {
                 secs,
                 tokens_in: 1000,
                 tokens_out: 0,
+                cached: 0,
             }];
             run
         };
@@ -614,7 +625,7 @@ mod tests {
         assert_eq!(medians[0].role, Role::Verifier);
         assert_eq!(medians[0].runs, 2);
         assert_eq!(medians[0].turn_secs, 801, "the middle of 360 and 1242");
-        assert_eq!(medians[0].turn_tokens, 1000);
+        assert_eq!(medians[0].fresh_tokens, 1000);
     }
 
     #[test]
@@ -629,6 +640,7 @@ mod tests {
             secs: 720.0,
             tokens_in: 0,
             tokens_out: 0,
+            cached: 0,
         }];
         let mut second = run("r2", "/ws", super::super::RunState::Done);
         second.role_usage = vec![super::super::RoleUsage {
@@ -637,6 +649,7 @@ mod tests {
             secs: 360.0,
             tokens_in: 0,
             tokens_out: 0,
+            cached: 0,
         }];
         let medians = History::from_runs(vec![past, second], "/ws", None).role_medians();
         assert_eq!(medians[0].turn_secs, 360);

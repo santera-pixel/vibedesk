@@ -434,6 +434,12 @@ pub const ESTIMATE_REFLECTION_TOKENS: u64 = 15_000;
 /// eighteen tasks on four workers would cost about 45 minutes, and the run
 /// produced one verified artifact in thirty. A cost model that never reads its
 /// own history is not an estimate, it is a slogan.
+/// Every field is a **fresh** token count: input the provider was not serving
+/// from its cache, plus output. Cache reads are excluded because they bill at a
+/// fraction of fresh input, so a single figure that mixed them would forecast the
+/// cache hit rate instead of the work — which is what made the audited run look
+/// cheap while it spent, and made its 60,000-token-per-turn constant look like a
+/// 652× error rather than the 13× one that mattered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Estimates {
     pub worker: u64,
@@ -475,10 +481,10 @@ impl Estimates {
         let mut observed: Option<usize> = None;
         for median in history.role_medians() {
             match median.role {
-                Role::Worker => out.worker = median.turn_tokens,
-                Role::Verifier => out.verifier = median.turn_tokens,
-                Role::Lead => out.lead = median.turn_tokens,
-                Role::Reflector => out.reflection = median.turn_tokens,
+                Role::Worker => out.worker = median.fresh_tokens,
+                Role::Verifier => out.verifier = median.fresh_tokens,
+                Role::Lead => out.lead = median.fresh_tokens,
+                Role::Reflector => out.reflection = median.fresh_tokens,
             }
             // The worker figure is the one that dominates the estimate, so it is
             // the one that decides whether the total is labelled measured.
@@ -1391,8 +1397,12 @@ mod tests {
                 role: Role::Worker,
                 turns: 1,
                 secs: secs as f64,
+                // The audited run's worker turn, in the shape the provider
+                // reports it: 39M input of which 38M was served from the prompt
+                // cache, plus 1M of output.
                 tokens_in: 39_000_000,
                 tokens_out: 1_000_000,
+                cached: 38_000_000,
             });
             let mut task = super::Task::new("t1", "One", "Do it", "node --test a.test.js");
             task.started_at = Some("2026-01-01T00:00:00.000Z".into());
@@ -1408,11 +1418,14 @@ mod tests {
         super::super::history::History::from_runs(runs, "/ws", None)
     }
 
-    /// The token estimate follows this workspace's own history, and says so.
+    /// The token estimate follows this workspace's own history, and counts the
+    /// work rather than the cache hit.
     ///
-    /// The constants promised 85,000 tokens for one task — a worker turn and a
-    /// verifier turn — when a worker turn on this machine cost 40M. The rehearsal
-    /// is what the user decides on, so it is the number that has to be measured.
+    /// Two mistakes in one test. The constants promised 85,000 tokens for one
+    /// task when a worker turn moved 40M, so the figure has to be measured. And
+    /// the measured figure has to exclude cache reads: 38 of those 39M were a
+    /// cache hit billing at a tenth of the rate, so a history read the obvious way
+    /// would plan the next run against the provider's cache, not against its work.
     #[test]
     fn the_token_estimate_follows_the_measured_worker_turn() {
         let tasks = vec![task("t1", &[]), task("t2", &["t1"])];
@@ -1428,16 +1441,30 @@ mod tests {
         let history = measured_history(1620);
         let measured = rehearse(&tasks, 2, Some(&history));
         assert_eq!(measured.tokens_measured_from, Some(2));
-        // The worker's turn was 40M tokens a turn, so two tasks cost far more than
-        // the constant claimed — and the verifier has no measurement, so it keeps
-        // its constant rather than borrowing the worker's.
+        // The worker's turn was charged for 2M tokens — 1M of fresh input and 1M
+        // of output — so two tasks cost far more than the constant claimed, and
+        // the verifier has no measurement, so it keeps its constant rather than
+        // borrowing the worker's.
         assert_eq!(
             measured.estimated_tokens,
             ESTIMATE_LEAD_TOKENS
                 + ESTIMATE_REFLECTION_TOKENS
-                + (40_000_000 + ESTIMATE_VERIFIER_TOKENS) * 2
+                + (2_000_000 + ESTIMATE_VERIFIER_TOKENS) * 2
         );
-        assert!(measured.estimated_tokens > assumed.estimated_tokens * 100);
+        assert!(measured.estimated_tokens > assumed.estimated_tokens * 10);
+
+        // The same history, read cache-included, would have planned the run at
+        // 40M a turn. That figure is what the audit called a 13x under-estimate
+        // and what the status payload called spend; the estimate is an order of
+        // magnitude below it because 38 of those 39M were cache reads.
+        let cache_included = ESTIMATE_LEAD_TOKENS
+            + ESTIMATE_REFLECTION_TOKENS
+            + (40_000_000 + ESTIMATE_VERIFIER_TOKENS) * 2;
+        assert!(
+            measured.estimated_tokens * 10 < cache_included,
+            "{} vs {cache_included}",
+            measured.estimated_tokens
+        );
     }
 
     /// The fourth proof of Phase 15: the derived budget moves when the median
