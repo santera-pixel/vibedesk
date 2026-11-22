@@ -606,6 +606,13 @@ impl AcpBridge {
         let stderr = child.stderr.take();
         let pid = child.id();
 
+        // The engine can be killed rather than shut down, and then nothing here
+        // runs to stop this child. The job object is the kernel's copy of that
+        // promise: no member outlives the process that started it.
+        if let Some(pid) = pid {
+            super::job::adopt(pid);
+        }
+
         *self.inner.stdin.lock().await = stdin;
         *self.inner.child.lock().await = Some(child);
 

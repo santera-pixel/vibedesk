@@ -461,6 +461,120 @@ The e2e suite's "has been running for over 60 seconds" line is libtest counting
 the mutex wait, not a slow test: the six runs are serialised by a global engine
 lock, so the last one starts ~53 s after the suite does and finishes ~11 s later.
 
+### The liveness seam — what the "600 s never fired" caveat was hiding
+
+The caveat said the wedged clock had never fired live. Going to fire it turned up
+the reason it could not: a member whose turn began and ended between two 400 ms
+ticks rested in `starting`, and no clock in the engine could see it.
+
+The evidence, from `run-20261122-201115-000` (scripted agent, step `{}` — it
+answers its brief and writes nothing):
+
+| Observation | Value |
+|---|---|
+| board | stops at `task verified` (t2); no nudge, no restart, no failure, no exit |
+| `run.json` | `state: running`, `t1: running`, `w-t1: starting`, `turns: 1`, `turnStartedAt: null` |
+| the member's ledger | 100 input / 20 output / 80 cached — **the turn ran and finished** |
+| the loop | traced: it ticked every 400 ms the whole time, and the sweep skipped `w-t1` every tick |
+
+Three defects at one seam, all three needed:
+
+1. **`fold_live` had no "the turn ended" transition.** `turn_started` and
+   `turn_ended` both run inside one prompt, so a short turn arrives at the fold as
+   a start that is already over. The fold moved a member only while `turn_at` was
+   `Some` and left everything else alone, so the member kept the word its spawn
+   gave it — and `starting` is documented as "the process is launching", which was
+   a lie the roster told for the rest of the run.
+2. **`charge_restart` used `state == Starting` as its "a restart is already
+   charged" flag.** That guard exists because two paths notice one death and only
+   one may pay for it. Reading it from the state word also refused the restart of
+   a member that was merely starting: `respawns` read 0 while every charge was
+   rejected as already in flight.
+3. **`wedge` watched `working` only**, so the member was invisible to the clock
+   that was supposed to name it.
+
+What changed:
+
+- `Member::restart_pending` carries the flag and nothing else does: set by
+  `charge_restart`, cleared by `spawn_for_task` when the new bridge is registered.
+  Not persisted — it guards a race inside one process, and a run read back after
+  that process died has no race left to guard.
+- `fold_live` maps an ended turn through `state_after_turn`, the one definition of
+  what a member reads between turns. It already refuses to move a member the
+  engine has decided about, so `parked`/`done`/`failed`/`lost` are untouched.
+- `watchable(member)` — `starting`, `idle`, `working` — is the single predicate
+  both sweeps use. `expected()` (role + task state) stays the thing that decides
+  whether the run still owes that member's silence an answer: a worker is expected
+  while its task is `Running`, a verifier while its task is `Verifying`. The state
+  word was a second, weaker gate, and it was the one that could not fail.
+- The sweep's restart line names the clock through `RestartCause::label()`, because
+  `stopped responding — restarted it on t3` was the sentence that could not tell a
+  dead process from a slow model.
+
+`--idle-secs` on `swarm-run` is what made the clock reachable in a test: the
+threshold is a process-wide setting (`engine::set_idle_limit`), so a run can be
+asked to call six seconds a wedge without touching the default.
+
+### What two independent readers found, and what was done about it
+
+The first version of this fix passed every test and was still wrong in five places.
+Two subagents read it cold — one instructed to attack the diff, one to find every
+other reader of the state word — and both landed on the same seam.
+
+| Finding | Verdict | What was done |
+|---|---|---|
+| The tick kept working from the **pre-fold snapshot**, so any later `write_run` in the same tick wrote the old roster back — and the next tick folded the same finished turn again, one span per tick | real | the fold's result is now the tick's run; pinned by folding twice in `a_turn_that_ended_between_ticks_leaves_the_member_idle` and asserting one span |
+| `fail_member` left `restart_pending` set, so a member whose spawn failed could never be restarted again while `respawns` read 0 | real | it clears the flag and the turn clock |
+| The fold idled a member the engine had put back to `queued` (`invalidate_built_on` leaves the turn clock set) | real | the `ended` branch is guarded by `watchable`, which excludes `queued` |
+| The fold idled a member whose restart had been charged but whose process did not exist yet | real | guarded by `!restart_pending`, and `charge_restart` now clears `turn_started_at` |
+| The reflection timeout asked `is_turning()`, which excludes `idle` — so a pass that answered without writing its file never degraded, and `REFLECTION_LIMIT_SECS` became dead code | real, and caused by this change | it asks `is_live()` |
+| `refresh_progress` was the third sweep still gated on `state == working` | real | it uses `watchable`; its rescue line says "the branch moved, which is work" rather than naming a word the member may no longer hold |
+| The panel described an idle lead as "waiting for the next tick" and had no count for a member between turns, so a healthy roster read as "0 working" | real, and caused by this change | an idle lead falls through to the run stage; the roster counts `idle` as "between turns" |
+
+Nine doc comments that the change had falsified were corrected in the same commit
+(`MEMBER_IDLE_LIMIT_SECS` described a `working`-only clock, `charge_restart` still
+named `starting` as its flag, `fold_live` claimed the watch had only two words to
+say, `stop_turn_clock` claimed the wedge ignored `idle`, `MemberState::Starting`
+claimed the process exists, and the panel's `describeAgent` claimed a lead is
+`working` for the whole run).
+
+**Not fixed, and named rather than papered over:**
+
+- **A spawn in flight is not distinguishable from a spawn that failed.**
+  `spawn_for_task`'s only dedupe is `bridges.contains_key`, so a restart charged
+  while a slow spawn is still opening its session could spawn a second process.
+  Reachable only by setting `--idle-secs` far below the 600 s default: the charge
+  needs more silence than the spawn takes. The durable fix is a "spawn in flight"
+  marker in `Inner`; it is not in this change.
+- **`fail_member` leaves the task `Running`.** A spawn that fails outright leaves a
+  task with no worker, and neither sweep can restart a `failed` member. The honest
+  fix is a task-level failure path, which is a decision about what a failed spawn
+  means for the plan, not a one-line repair.
+- **A `queued` member and a `waiting` member whose bridge was taken** are outside
+  both sweeps. Both are windows around a spawn rather than steady states, and both
+  are invisible for the same reason as the first bullet: nothing records that a
+  spawn is in flight.
+
+### The runner, the kill path, and the job object
+
+Two of the three open caveats were "no automated test proves it". Both have one
+now, in `src-tauri/tests/swarm_runner.rs`, `#![cfg(windows)]`: a hermetic
+`VIBE_HOME` laid out from `provision::payload::FILES`, a seeded repository, the
+scripted agent, and the real `swarm-run.exe` driven as the user drives it.
+
+| Test | What it proves | Measured |
+|---|---|---|
+| `a_finished_run_releases_its_agents_before_the_runner_exits` | exit 0, exactly one `released 4 agent processes` note, the run's checkout directory gone, no member process alive | passes; the two-test binary runs in 9.6 s |
+| `a_member_dies_with_the_engine_that_started_it` | `taskkill /PID <engine> /F` **without** `/T`, and the spawned member is dead within 20 s | passes |
+
+The second one is a new mechanism rather than a test of an old one: nothing in the
+engine made its children die with it. `acp/job.rs` adopts each agent into a Windows
+job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and never closes the handle, so
+the children are killed by the operating system when the engine's process ends,
+however it ends. **Falsified**: with `job::adopt` stubbed out the test fails with
+`members [15856] outlived the engine that started them` after 21.6 s; restored, it
+passes in 0.9-11.5 s.
+
 ### Still not done (updated)
 
 - **Money is measured now, on one model only.** `deepseek` is priced; a run on a
@@ -489,10 +603,15 @@ lock, so the last one starts ~53 s after the suite does and finishes ~11 s later
   for this shape, not an average.
 - `MAX_INFRA_RESTARTS = 3` has never fired in a live run. Both rehearsals had zero
   infra restarts after the fixes, so the ceiling is only exercised by tests.
-- The clock that fails a genuinely wedged member (`MEMBER_IDLE_LIMIT_SECS`) has
-  still not fired live. Run 1 showed a lead mid-turn past 300 s with a nudge that
-  could not be delivered; that path works, but the 600 s threshold itself is
-  untested against a real wedge.
+- The clock that fails a genuinely wedged member has now fired, but only against
+  the scripted agent at `--idle-secs 6` (`a_silent_worker_is_wedged_by_the_clock_
+  that_names_itself`, 9.9 s). The default 600 s has still never been reached by a
+  real model doing real work, and the honest statement is that the *mechanism* is
+  exercised while the *number* is not.
+- The job object covers an engine process that dies. It does not cover a member
+  that spawns children of its own: those inherit the job too, which is the
+  behaviour wanted, but nothing in this repo has measured a real `vibe-acp` tree
+  dying that way — only the scripted agent.
 - `MAX_INFRA_RESTARTS = 3` is a judgement, not a derived figure. Three covers a
   one-off crash of a shared process; a run that trips it on a machine where the
   agent legitimately restarts more often would need the number raised, and that

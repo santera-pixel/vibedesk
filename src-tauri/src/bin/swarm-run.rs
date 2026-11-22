@@ -56,13 +56,14 @@ fn arg(name: &str) -> Option<String> {
 ///
 /// A flag it does not know is a typo, and a typo that is ignored is a run that
 /// spends real tokens on a goal nobody asked for.
-const FLAGS: [&str; 12] = [
+const FLAGS: [&str; 13] = [
     "--workspace",
     "--goal",
     "--budget",
     "--budget-micros",
     "--concurrency",
     "--timeout",
+    "--idle-secs",
     "--models",
     "--model",
     "--thinking",
@@ -88,6 +89,8 @@ swarm-run — run a swarm headlessly
   --worker-model <alias>    pin the workers' model
   --verifier-model <alias>  pin the verifiers' model
   --thinking <spec>         one level for every role, or lead,worker,verifier
+  --idle-secs <seconds>     how long a silent member is left before it counts as
+                            wedged (default: the engine's 600s)
 ";
 
 #[tokio::main]
@@ -129,6 +132,12 @@ async fn main() {
     let timeout_secs: u64 = arg("--timeout")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1800);
+    // The wedged clock is a documented threshold, not a hidden constant: a run
+    // that expects long thinks can raise it, and a test lowers it to watch the
+    // clock fire instead of waiting ten minutes.
+    if let Some(secs) = arg("--idle-secs").and_then(|v| v.parse().ok()) {
+        engine::set_idle_limit(secs);
+    }
 
     // The capability layer reads its own file. The app loads it at startup; a
     // headless run has to do the same, or the swarm's first precondition reads

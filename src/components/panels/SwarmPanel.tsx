@@ -779,6 +779,14 @@ function Roster({
               {view.working} working
             </span>
           )}
+          {view.idle > 0 && (
+            <span
+              className="vd-numeric text-[9.5px] text-[var(--vd-text-tertiary)]"
+              title="Alive and between turns — the normal shape of a healthy run"
+            >
+              {view.idle} between turns
+            </span>
+          )}
           {view.parked > 0 && (
             <span className="vd-numeric text-[9.5px] text-[var(--vd-text-tertiary)]">
               {view.parked} parked

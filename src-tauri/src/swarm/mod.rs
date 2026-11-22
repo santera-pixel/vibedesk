@@ -332,7 +332,12 @@ pub enum MemberState {
     /// members starting while three `vibe-acp` processes existed — the roster
     /// was not lying about a state, it was reporting a state that did not exist.
     Queued,
-    /// The process is launching: it exists, the session is not open yet.
+    /// A spawn is in flight: the session is not open yet.
+    ///
+    /// Most writers set this before a process exists — the scheduler when it
+    /// dispatches a task, `charge_restart` when it charges a restart — so the
+    /// honest reading is "the engine is bringing this member up", not "a process
+    /// is running". Where the process really is, `pid` says.
     Starting,
     /// The turn is over: the process is alive, nothing is being spent, and the
     /// member is not expected to say anything until it is asked.
@@ -1088,6 +1093,21 @@ pub struct Member {
     /// on spawn from looping.
     #[serde(default)]
     pub respawns: u32,
+    /// A restart has been charged and its process does not exist yet.
+    ///
+    /// This is what makes charging a restart idempotent. It used to be inferred
+    /// from `state == Starting`, which is a word about a process that exists: a
+    /// member whose turn began and ended between two ticks rested in `starting`,
+    /// so every later restart was refused as one already in flight, and the
+    /// member sat there invisible to both clocks. A flag can only mean the one
+    /// thing it is named for.
+    ///
+    /// Not saved. It guards a race between two paths inside one process, and a
+    /// run read back after that process is gone has no race left to guard: a
+    /// persisted `true` would mark a member un-restartable because the app
+    /// closed between the charge and the spawn.
+    #[serde(skip)]
+    pub restart_pending: bool,
     /// The skills this member was told to load, in the order the brief named them.
     #[serde(default)]
     pub skills_assigned: Vec<String>,
@@ -1146,6 +1166,7 @@ impl Member {
             error: None,
             nudges: 0,
             respawns: 0,
+            restart_pending: false,
             skills_assigned: Vec::new(),
             skills_loaded: Vec::new(),
             activity: Activity::default(),
@@ -1994,8 +2015,10 @@ mod tests {
     /// escalate ask — is there a process here to park or lose — and an idle
     /// member's process is still alive, so leaving it `idle` on a cancelled run
     /// would be the roster claiming a process that has just been killed.
-    /// `is_turning` is what the reflection timeout asks — is this pass still
-    /// running — and an idle reflector has stopped running.
+    /// `is_turning` asks whether a turn is in flight, which is a different
+    /// question from whether the member still owes the run something: the
+    /// reflection timeout asks the second one, and a reflector whose turn ended
+    /// without writing its file reads `idle`.
     #[test]
     fn a_state_says_whether_it_is_live_and_whether_it_is_turning() {
         let expected: [(MemberState, bool, bool); 9] = [

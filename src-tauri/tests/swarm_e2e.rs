@@ -763,3 +763,66 @@ async fn a_dependent_starts_before_its_dependency_is_verified() {
 
     h.cleanup();
 }
+
+/// The wedged clock, fired in a live run.
+///
+/// `MEMBER_IDLE_LIMIT_SECS` had never fired outside a unit test that fabricates a
+/// member's last-seen timestamp: the clock was checked, but nothing had watched
+/// the engine reach it against a real, silent, scripted member. Ten minutes of
+/// wall clock is why. The limit is a field now (`--idle-secs` on the runner), so
+/// this test lowers it to a few seconds and lets the sweep run for real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_worker_is_wedged_by_the_clock_that_names_itself() {
+    let _guard = lock();
+    // w-t1 answers its turn and produces nothing: no commit, no evidence, no
+    // further sign of life. That is a wedged member, not a busy one.
+    let script = json!({
+        "members": {
+            "lead": [{ "files": { "<inbox>/plan.json": plan_json() } }],
+            "w-t1": [{}],
+            "v-t1": [{ "files": { "<inbox>/verdict.json": verdict("t1", "node --test test/a.test.js") } }],
+            "w-t2": [raise_b()],
+            "v-t2": [{ "files": { "<inbox>/verdict.json": verdict("t2", "node --test test/b.test.js") } }],
+            "reflect": [{ "files": { "<inbox>/gotchas.json": reflection() } }]
+        }
+    });
+
+    // Restored on the way out however this test ends: the engine is a singleton,
+    // so a short limit left behind would change every test after this one.
+    struct Limit;
+    impl Drop for Limit {
+        fn drop(&mut self) {
+            vibedesk_lib::swarm::engine::set_idle_limit(600);
+        }
+    }
+    vibedesk_lib::swarm::engine::set_idle_limit(6);
+    let _limit = Limit;
+
+    let h = Harness::new("wedged", script);
+    h.start().await;
+    h.approve().await;
+
+    wait_for(
+        "the wedged clock to fire and name itself",
+        Duration::from_secs(90),
+        || {
+            engine()
+                .board_tail()
+                .iter()
+                .any(|e| e.text.contains("silent past the wedged limit"))
+        },
+    );
+
+    let trail = h.trail();
+    assert!(
+        trail.contains("w-t1") && trail.contains("could not get an answer on t1"),
+        "the sentence names the member and its task:\n{trail}"
+    );
+
+    // Stop it rather than let a wedged member's respawn loop run on into the
+    // next test. Stopping is also what releases the agents.
+    let sink: Arc<dyn vibedesk_lib::acp::bridge::EventSink> = h.sink.clone();
+    let _ = engine().stop(&sink);
+    h.release().await;
+    h.cleanup();
+}

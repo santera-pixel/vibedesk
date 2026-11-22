@@ -131,6 +131,8 @@ export interface RosterView {
   queued: number;
   /** How many are inside a turn right now. */
   working: number;
+  /** How many are alive and between turns: a healthy run's normal shape. */
+  idle: number;
   /** How many are suspended and spending nothing. */
   parked: number;
   /** How many have failed or lost their process. */
@@ -142,8 +144,9 @@ export interface RosterView {
  *
  * Total over `MemberState` and over `Role`, so a state the panel cannot describe
  * fails to compile rather than rendering as a bare word. The lead is described
- * by the run's stage rather than by its own state, because a lead is `working`
- * for the whole run and that tells the user nothing.
+ * by the run's stage rather than by its own state, because a lead inside a turn is that turn
+ * and a lead between turns is the stage it is driving. The alternative — the
+ * lead's own word — told the user nothing for the length of a run.
  */
 export function describeAgent(member: Member, task: Task | null, run: Run): string {
   switch (member.state) {
@@ -169,7 +172,10 @@ export function describeAgent(member: Member, task: Task | null, run: Run): stri
     case 'done':
       return member.role === 'reflector' ? 'wrote the reflection' : 'finished';
     case 'idle':
-      return member.role === 'lead' ? 'waiting for the next tick' : 'idle';
+      // A worker between turns has nothing else to say here; a lead is described
+      // by the stage it is driving, which is the same sentence it gets mid-turn.
+      if (member.role !== 'lead') return 'idle';
+      break;
     case 'waiting':
       // Blocked on a permission or an elicitation the gate has not answered.
       // Not "waiting on t1": the task is not what is holding it up, and the user
@@ -400,11 +406,14 @@ export function rosterView(run: Run, board: BoardEntry[]): RosterView {
     // in none of the three, so a roster of twelve waiting on slots read as a
     // roster of four.
     //
-    // They do not cover every state, and are not meant to: `starting`, `idle`,
-    // `waiting` and `done` are none of these four, and the roster's own total is
-    // printed beside them for exactly that reason.
+    // They do not cover every state, and are not meant to: `starting`, `waiting`
+    // and `done` are none of these five, and the roster's own total is printed
+    // beside them for exactly that reason. `idle` is counted because it is the
+    // ordinary state of a member between turns, and a healthy roster of four that
+    // read "0 working" looked like four that had stopped.
     queued: all.filter((agent) => agent.member.state === 'queued').length,
     working: all.filter((agent) => agent.member.state === 'working').length,
+    idle: all.filter((agent) => agent.member.state === 'idle').length,
     parked: all.filter((agent) => agent.parked).length,
     broken: all.filter((agent) => agent.tone === 'bad').length,
   };

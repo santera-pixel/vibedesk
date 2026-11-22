@@ -200,8 +200,12 @@ test('a queued member says it is waiting for a slot, not that it is working', ()
   assert.doesNotMatch(text, /implementing/, 'a member with no process is not implementing');
 });
 
-test('the lead is described by the run stage, not by its own state', () => {
-  const lead = member('lead', 'lead', 'working');
+test('the lead is described by the run stage, between turns as well as inside one', () => {
+  // A lead that has finished its turn is the normal shape of a healthy run: the
+  // engine folds the end of every turn to `idle`. Reading that word as the lead's
+  // description made the roster say "waiting for the next tick" for the length of
+  // a run and made every stage sentence unreachable outside a turn.
+  const lead = member('lead', 'lead', 'idle');
   const stages: Array<[Run['state'], RegExp]> = [
     ['planning', /planning/],
     ['replanning', /re-planning/],

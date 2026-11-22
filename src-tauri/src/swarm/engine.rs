@@ -53,8 +53,13 @@ pub const EVENT_SWARM: &str = "swarm://changed";
 /// nothing.
 const TICK: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// How long a member may sit in `Working` with no board entry before the engine
-/// treats it as wedged.
+/// How long a live member may sit with no board entry before the engine treats it
+/// as wedged.
+///
+/// Not only a `working` member: `watchable` is the sweep's definition, and it
+/// covers `starting` and `idle` too, because a member whose turn ended with
+/// nothing to show and a member whose spawn never asked it anything are both
+/// members the run is still waiting on.
 const MEMBER_IDLE_LIMIT_SECS: i64 = 600;
 
 /// How long a worker may work without producing a commit before the run says so.
@@ -354,6 +359,13 @@ struct Inner {
     /// The run whose end-of-run release has already happened. The drive loop and
     /// the headless runner both ask for it, and the second ask must do nothing.
     ended: Option<String>,
+    /// How long a member may be silent before it counts as wedged.
+    ///
+    /// A field rather than the constant alone so the headless runner can lower it
+    /// and a test can watch the wedged clock fire in seconds instead of ten
+    /// minutes. The default is the documented threshold and nothing in the app
+    /// changes it.
+    idle_limit_secs: i64,
 }
 
 impl Inner {
@@ -391,6 +403,7 @@ impl Default for Engine {
                 board_bytes: 0,
                 stopped: BTreeSet::new(),
                 ended: None,
+                idle_limit_secs: MEMBER_IDLE_LIMIT_SECS,
             }),
         }
     }
@@ -2471,13 +2484,17 @@ fn spawn_for_task(
                         if let Some(member) = run.member_mut(&member_id) {
                             member.session_id = Some(session_id.clone());
                             member.pid = pid;
+                            // The restart has been carried out: the process it
+                            // was charged for is this one.
+                            member.restart_pending = false;
                             // What the session reports, not what was asked for.
                             member.thinking = thinking.clone();
                             member.agent = agent.clone();
                             // Starting, not working: the process exists and the
                             // session is open, but no turn has been asked for
-                            // yet. The turn start is what makes it `working`,
-                            // and it is the only thing that can.
+                            // yet. The turn clock is what makes it `working` and
+                            // the end of that turn is what makes it `idle`; both
+                            // come from the fold, not from here.
                             member.state = MemberState::Starting;
                             member.worktree = Some(path.to_string_lossy().to_string());
                             member.task = Some(task_id.clone());
@@ -2648,6 +2665,22 @@ impl RestartCause {
     }
 }
 
+/// Whether a member's silence is a clock of ours to read.
+///
+/// Every state a live member can rest in, not only `working`. A worker whose turn
+/// ended with no evidence sits `idle`, and a member whose spawn never asked it
+/// anything sits `starting`; both are members the run is still waiting on, and
+/// keeping the two sweeps on one definition is what stops a state word from
+/// hiding a member from every clock in the engine. `waiting` is the one exclusion
+/// — it is blocked on an answer from the user, and no clock of ours can shorten
+/// that. `parked`, `done`, `failed` and `lost` are decisions, not waits.
+fn watchable(member: &Member) -> bool {
+    matches!(
+        member.state,
+        MemberState::Starting | MemberState::Idle | MemberState::Working
+    )
+}
+
 /// Whether the run has lost the agent process often enough to stop.
 ///
 /// `Some(sentence)` means stop: the sentence is the failure the run records, and
@@ -2688,11 +2721,13 @@ enum Charge {
 /// budget, so the member was never restarted again and sat `Working` with no
 /// process for the rest of the run.
 ///
-/// `Starting` is the flag that makes it idempotent: both paths set it as part of
-/// charging, so whichever loses the race sees a restart already in flight rather
-/// than a member to charge for.
+/// `restart_pending` is the flag that makes it idempotent: both paths set it and
+/// only `spawn_for_task` clears it, so whichever loses the race sees a restart
+/// already in flight rather than a member to charge for. It used to be the
+/// `starting` state word, which also made a member that had merely started
+/// unchargeable — see `watchable`.
 fn charge_restart(member: &mut Member, cause: RestartCause) -> Charge {
-    if member.state == MemberState::Starting {
+    if member.restart_pending {
         return Charge::AlreadyRestarting;
     }
     if member.respawns >= MAX_RESPAWNS {
@@ -2708,10 +2743,15 @@ fn charge_restart(member: &mut Member, cause: RestartCause) -> Charge {
             member.restarts_provider = member.restarts_provider.saturating_add(1);
         }
     }
+    member.restart_pending = true;
     member.state = MemberState::Starting;
     member.session_id = None;
     member.pid = None;
     member.nudges = 0;
+    // The turn the clock was measuring died with the process. Left set, the fold
+    // would read the charged restart as a finished turn and call a member with no
+    // process `idle`.
+    member.turn_started_at = None;
     member.last_at = Some(now());
     Charge::Allowed
 }
@@ -2898,6 +2938,11 @@ fn fail_member(sink: &Arc<dyn EventSink>, member_id: &str, error: &str) {
         if let Some(member) = run.member_mut(member_id) {
             member.state = MemberState::Failed;
             member.error = Some(error.to_string());
+            // The spawn that was charged for this restart never happened, so
+            // nothing is in flight. Left set, every later charge would be refused
+            // as one already in flight while `respawns` read zero.
+            member.restart_pending = false;
+            member.turn_started_at = None;
         }
         run.touch();
         run.clone()
@@ -3279,6 +3324,32 @@ fn write_receipt(dir: &Path, name: &str, accepted: bool, reason: String, seq: Op
  * The drive loop
  * ------------------------------------------------------------------ */
 
+/// How long a member may be silent before the wedged clock fires.
+fn idle_limit() -> i64 {
+    engine()
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .idle_limit_secs
+}
+
+/// Lower or raise the wedged-member threshold for this process.
+///
+/// The headless runner exposes it as `--idle-secs`, and the end-to-end suite uses
+/// it to watch the wedged clock fire in seconds rather than the ten minutes the
+/// default would take. Nothing in the desktop app calls it, so the documented
+/// threshold is what a user's run gets.
+pub fn set_idle_limit(secs: i64) {
+    if secs <= 0 {
+        return;
+    }
+    engine()
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .idle_limit_secs = secs;
+}
+
 /// How many times one member's process may be restarted before the run gives up.
 const MAX_RESPAWNS: u32 = 2;
 
@@ -3318,10 +3389,11 @@ struct Restart {
 /// The restarts are returned rather than spawned here, so the decision is
 /// testable without a live agent.
 fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> bool) -> Option<(Run, Vec<Restart>)> {
+    let limit = idle_limit();
     let mut next = run.clone();
     let mut restarted: Vec<(String, String, bool)> = Vec::new();
     for member in std::iter::once(&next.lead).chain(next.members.iter()) {
-        if member.state != MemberState::Working || member.respawns >= MAX_RESPAWNS {
+        if !watchable(member) || member.respawns >= MAX_RESPAWNS {
             continue;
         }
         let Some(task_id) = member.task.clone() else {
@@ -3341,7 +3413,7 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
         let Some(idle) = silence_secs(member) else {
             continue;
         };
-        if idle <= MEMBER_IDLE_LIMIT_SECS {
+        if idle <= limit {
             continue;
         }
         restarted.push((member.id.clone(), task_id, member.role == Role::Verifier));
@@ -3533,7 +3605,7 @@ fn refresh_progress(sink: &Arc<dyn EventSink>, run: Run) -> Run {
     // loop holds the roster mutably.
     let mut probed: Vec<(String, String, Option<String>)> = Vec::new();
     for member in std::iter::once(&mut next.lead).chain(next.members.iter_mut()) {
-        if member.state != MemberState::Working {
+        if !watchable(member) {
             continue;
         }
         let Some(idle) = silence_secs(member) else {
@@ -3593,7 +3665,7 @@ fn refresh_progress(sink: &Arc<dyn EventSink>, run: Run) -> Run {
             BoardEntry::new(
                 "engine",
                 BoardKind::Note,
-                format!("{id} committed {short} — working, not silent"),
+                format!("{id} committed {short} — the branch moved, which is work"),
             )
             .about("run"),
         );
@@ -3674,10 +3746,7 @@ fn wedge(
     let mut next = run.clone();
     let mut wedged: Vec<String> = Vec::new();
     for member in std::iter::once(&mut next.lead).chain(next.members.iter_mut()) {
-        if member.state != MemberState::Working {
-            continue;
-        }
-        if !expected(member) {
+        if !watchable(member) || !expected(member) {
             continue;
         }
         let Some(last) = member.last_at.as_deref() else {
@@ -3720,7 +3789,7 @@ fn wedge(
         let limit = if in_flight {
             MEMBER_TURN_CEILING_SECS
         } else {
-            MEMBER_IDLE_LIMIT_SECS
+            idle_limit()
         };
         if model_silent || idle > limit {
             member.state = MemberState::Failed;
@@ -4032,16 +4101,24 @@ fn fold_usage(run: &mut Run, ledgers: &[(String, Usage)]) -> bool {
 /// top of the tick and writes that snapshot back, so anything another task wrote
 /// in between is overwritten on the next save.
 ///
-/// A turn in flight is `working`, and a turn in flight with a request open is
-/// `waiting`. Nothing else is the watch's to say. A member with no turn in flight
-/// keeps whatever the engine last said, because the engine's own transitions —
-/// parked, done, failed — are the ones that end a member's part in the run.
+/// A turn in flight is `working`, a turn in flight with a request open is
+/// `waiting`, and a turn that has ended is `idle`. The engine's own decisions —
+/// parked, done, failed, lost, and a member still waiting for a slot — are the
+/// words the fold may not move, and `state_after_turn` is the one place that
+/// decides between them and `idle`.
 fn fold_live(run: &mut Run, live: &[(String, Live)]) -> bool {
     let mut moved = false;
     for (id, facts) in live {
         let Some(member) = run.member_mut(id) else {
             continue;
         };
+        // A turn that ended between two ticks is the one transition the fold did
+        // not have: `turn_started` and `turn_ended` both run inside one prompt, so
+        // the walk back to `None` is the only evidence a short turn ever leaves.
+        // Without it the member stayed in whatever state its spawn left it in —
+        // `starting`, a word about a process that does not exist yet — and the
+        // wedged clock, which watches `working`, never saw it again.
+        let ended = member.turn_started_at.is_some() && facts.turn_at.is_none();
         if member.turn_started_at != facts.turn_at {
             // A turn that has ended is a span. `turn_started_at` is cleared here,
             // so without this the run keeps no record of when a member worked —
@@ -4075,6 +4152,15 @@ fn fold_live(run: &mut Run, live: &[(String, Live)]) -> bool {
         } else if facts.turn_at.is_some() {
             // A turn in flight is work.
             Some(MemberState::Working)
+        } else if ended && watchable(member) && !member.restart_pending {
+            // Between turns: the process is alive and nothing is being spent.
+            //
+            // `watchable` is the guard, not decoration: `queued` is a member with
+            // no process (`invalidate_built_on` puts one back there with its turn
+            // clock still set), and calling it `idle` would be the same lie in the
+            // other direction. `restart_pending` is the other: the process for
+            // that member does not exist yet, so between turns is not where it is.
+            state_after_turn(member)
         } else {
             None
         };
@@ -4410,7 +4496,14 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                 write_run(&next);
                 emit(&sink, &next);
             }
-        }
+            // The fold's result *is* this tick's run. Keeping the pre-fold
+            // snapshot was the second half of the same blindness: every later
+            // `write_run` in this tick was built from the roster before the fold,
+            // so it wrote `starting` (and the turn clock it had just cleared) back
+            // over what the fold had saved — and the next tick folded the same
+            // finished turn again, one span per tick.
+            next
+        };
 
         // 0b. A commit is work.
         //
@@ -5894,12 +5987,15 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                                         .clone()
                                         .unwrap_or_else(|| "the reflection pass failed".into()),
                                 )
-                            } else if member.state.is_turning() {
-                                // `is_turning`, not `is_live`: the question here
-                                // is whether the reflection pass is still
-                                // running, and a reflector whose turn is over has
-                                // stopped running whether or not its process is
-                                // still there.
+                            } else if member.state.is_live() {
+                                // `is_live`, not `is_turning`: the question is
+                                // whether this pass still owes the run its file.
+                                // A reflector whose turn ended without writing
+                                // `gotchas.json` reads `idle` — the process is
+                                // alive and it said nothing — and `is_turning`
+                                // excludes exactly that, so the degrade clock never
+                                // started and a finished run waited on a pass that
+                                // was already over.
                                 member
                                     .last_at
                                     .as_deref()
@@ -5992,9 +6088,15 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                     BoardEntry::new(
                         "engine",
                         BoardKind::Note,
+                        // The same sentence the turn-error path writes, and for
+                        // the same reason: the audit could not tell a dead
+                        // process from a wedged turn because both arrived as
+                        // "stopped responding — restarted it on t3".
                         format!(
-                            "{} stopped responding — restarted it on {}",
-                            restart.member, restart.task
+                            "{} could not get an answer on {} — {} — restarted it",
+                            restart.member,
+                            restart.task,
+                            restart.cause.label()
                         ),
                     )
                     .about(&restart.task),
@@ -6635,11 +6737,10 @@ async fn retire_verifier(next: &mut Run, task_id: &str) {
 /// the end of a turn, and a clock left running is a panel that says a member has
 /// been working for forty minutes on a turn that ended in the first one.
 ///
-/// The state is not touched here. `drive_turn` ends the lead's turns too, and a
-/// lead put to `Idle` between turns is a lead the wedge detector stops watching —
-/// which is the failure `after_amendment` was written to fix. `end_member_turn`
-/// sets the state itself, after this, because it is the one caller that knows the
-/// engine has no further use for the turn.
+/// The state is not touched here. `drive_turn` ends the lead's turns too, and the
+/// fold is what says `idle` between turns; `end_member_turn` sets the state itself
+/// after this, because it is the one caller that knows the engine has no further
+/// use for the turn — it is a decision, and the fold may not move a decision.
 fn stop_turn_clock(member_id: &str) {
     if let Some(watch) = watch_of(member_id) {
         watch.turn_ended();
@@ -7750,6 +7851,9 @@ mod tests {
         );
         assert_eq!((member.respawns, member.restarts_infra), (1, 1));
 
+        // What the spawn that carries a restart out does: the process exists, so
+        // the charge is no longer pending.
+        member.restart_pending = false;
         member.state = MemberState::Working;
         assert_eq!(
             charge_restart(&mut member, RestartCause::Timeout),
@@ -7759,6 +7863,7 @@ mod tests {
 
         // The budget is spent: a third charge is refused whatever the cause, and
         // the counter it would have moved stays where it was.
+        member.restart_pending = false;
         member.state = MemberState::Working;
         assert_eq!(
             charge_restart(&mut member, RestartCause::Provider),
@@ -8918,6 +9023,95 @@ name: a");
         std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
     }
 
+    /// A member that finished its turn and wrote nothing is a wedge.
+    ///
+    /// The sweep used to require `working`, so a member whose turn began and ended
+    /// between two ticks rested in `starting` — no clock in the engine could see
+    /// it, and every live symptom of the wedged limit firing "3.3x early" was this
+    /// hole rather than a clock.
+    #[test]
+    fn a_silent_worker_between_turns_is_a_wedge() {
+        let mut run = run_with_silent_worker(TaskState::Running, MEMBER_IDLE_LIMIT_SECS + 60);
+        run.members[0].state = MemberState::Idle;
+        let wedged = wedge(&run, &never_busy, &no_pulse)
+            .expect("a worker between turns whose task is running is silence the run owns");
+        let failure = wedged.failure.clone().unwrap_or_default();
+        assert!(failure.contains("w-t1"), "the reason names the member: {failure}");
+        std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
+    }
+
+    /// A turn that ended between two ticks leaves the member `idle`.
+    ///
+    /// `turn_started` and `turn_ended` both run inside one prompt, so a short turn
+    /// arrives at the fold as a start that is already over. Without this
+    /// transition the member kept whatever word its spawn gave it, and `starting`
+    /// is a word about a process that does not exist yet.
+    #[test]
+    fn a_turn_that_ended_between_ticks_leaves_the_member_idle() {
+        let mut run = run_with_silent_worker(TaskState::Running, 0);
+        run.members[0].state = MemberState::Starting;
+        run.members[0].turn_started_at = Some(now());
+
+        let live = vec![
+            ("w-t1".to_string(), Live { blocked: false, turn_at: None }),
+        ];
+        assert!(fold_live(&mut run, &live), "the roster moved");
+
+        let member = run.member("w-t1").unwrap();
+        assert_eq!(
+            member.state,
+            MemberState::Idle,
+            "a finished turn is between turns, not starting"
+        );
+        assert!(member.turn_started_at.is_none(), "the clock is cleared");
+        assert_eq!(member.spans.len(), 1, "the turn is kept as a span");
+
+        // The same facts, folded again, move nothing. This is the contract that
+        // stops the loop from rewriting the fold's result: a tick that carries the
+        // pre-fold roster forward folds the same finished turn on every tick, and
+        // one span per tick is what that looks like from here.
+        assert!(!fold_live(&mut run, &live), "a tick that changes nothing moves nothing");
+        assert_eq!(run.member("w-t1").unwrap().spans.len(), 1, "one turn, one span");
+        std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
+    }
+
+    /// The restart guard is its own flag, not a state word.
+    ///
+    /// Two paths charge the same death and only one may pay for it, which is what
+    /// the guard is for. Reading that from `state == Starting` also refused the
+    /// restart of a member that was merely starting, so a member left in that
+    /// state could never be restarted at all: its budget read zero while every
+    /// charge was rejected as one already in flight.
+    #[test]
+    fn a_restart_is_charged_once_and_never_refused_for_a_state_word() {
+        let mut member = Member::new("w-t1", Role::Worker, "m");
+        member.state = MemberState::Starting;
+
+        assert_eq!(
+            charge_restart(&mut member, RestartCause::Timeout),
+            Charge::Allowed,
+            "a member in `starting` has no restart in flight"
+        );
+        assert_eq!((member.respawns, member.restarts_timeout), (1, 1));
+        assert!(member.restart_pending);
+
+        assert_eq!(
+            charge_restart(&mut member, RestartCause::Infra),
+            Charge::AlreadyRestarting,
+            "the second path to notice one death loses the race"
+        );
+        assert_eq!((member.respawns, member.restarts_timeout), (1, 1));
+
+        // The spawn that carries the restart out clears the flag.
+        member.restart_pending = false;
+        member.state = MemberState::Idle;
+        assert_eq!(
+            charge_restart(&mut member, RestartCause::Infra),
+            Charge::Allowed
+        );
+        assert_eq!((member.respawns, member.restarts_infra), (2, 1));
+    }
+
     #[test]
     fn a_member_mid_turn_is_working_not_wedged_however_long_it_has_been_quiet() {
         // `last_at` only moves when a member writes to the board, so a verifier
@@ -9639,6 +9833,7 @@ name: a");
             board_bytes: 0,
             stopped: BTreeSet::new(),
             ended: None,
+            idle_limit_secs: MEMBER_IDLE_LIMIT_SECS,
         };
         let bridge = Arc::new(AcpBridge::with_sink(Arc::new(
             crate::acp::bridge::NullSink,
@@ -11638,8 +11833,8 @@ name: a");
         assert_eq!(run.member("w-t1").unwrap().turn_started_at, None);
         assert_eq!(
             run.member("w-t1").unwrap().state,
-            MemberState::Working,
-            "a member with a task keeps the state the engine gave it"
+            MemberState::Idle,
+            "a member between turns is idle; the engine's decisions are the words the fold may not move"
         );
     }
 
@@ -11813,27 +12008,31 @@ name: a");
         );
     }
 
-    /// A worker whose turn the engine ends reads `idle`, and the wedge detector
-    /// leaves it alone.
+    /// A worker whose part is over reads `idle`, and the wedge detector leaves it
+    /// alone because its task moved on — not because of the word.
     ///
-    /// `Idle` is the turn being over, which is true of a member with a task as
-    /// much as one without: a worker whose evidence has landed has finished its
-    /// part, and the minutes a verifier takes are not the worker working. The
-    /// wedge detector gates on `working`, so an idle member is not expected to
-    /// talk — which is the point, because it has nothing left to say.
+    /// The gate that decides is `expected()`: a worker is expected while its task
+    /// is `Running`, and the task moves to `Verifying` the moment its evidence
+    /// lands. Reading the state word as a second gate was the defect, not a
+    /// second safeguard: an `idle` worker whose task is still `Running` owes the
+    /// run a file, and calling that "nothing left to say" is how a run sat
+    /// `running` for an hour with a worker that had answered its brief and
+    /// written nothing.
     #[test]
-    fn a_worker_whose_turn_ends_reads_idle_and_is_not_failed_by_the_wedge() {
+    fn a_worker_whose_part_is_over_reads_idle_and_is_not_failed_by_the_wedge() {
         let mut run = run_with_silent_worker(TaskState::Running, MEMBER_IDLE_LIMIT_SECS + 60);
 
-        // The same member, still `working`, is a wedge: the silence is real and
-        // the task is still running. This is the contrast that makes the next
-        // assertion mean something.
+        // The same member, still on a running task, is a wedge: the silence is
+        // real and the work is unfinished. This is the contrast that makes the
+        // next assertion mean something.
         assert!(
             wedge(&run, &never_busy, &no_pulse).is_some(),
             "a silent worker mid-task is a wedge"
         );
 
-        // The engine ends the turn because the evidence has landed.
+        // The evidence landed, so the task is a verifier's now, and the engine
+        // idles the worker.
+        run.task_mut("t1").unwrap().state = TaskState::Verifying;
         let state = state_after_turn(run.member("w-t1").unwrap())
             .expect("a working member is idled by the end of its turn");
         run.member_mut("w-t1").unwrap().state = state;
@@ -11841,7 +12040,7 @@ name: a");
 
         assert!(
             wedge(&run, &never_busy, &no_pulse).is_none(),
-            "an idle member is not expected to talk, so its silence is not a wedge"
+            "the worker's part is over, so its silence is the verifier's turn to answer"
         );
         std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
     }

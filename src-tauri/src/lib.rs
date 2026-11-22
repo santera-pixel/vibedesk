@@ -19,6 +19,9 @@ mod paths;
 mod plugin_panels;
 mod plugins;
 mod provision;
+/// The agent payload the swarm runs on, re-exported so the runner's own test can
+/// lay out a `VIBE_HOME` from code instead of borrowing the user's install.
+pub use provision::payload as agent_payload;
 mod release_notes;
 mod settings;
 mod skills;
