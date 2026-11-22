@@ -122,6 +122,10 @@ fn tools() -> Value {
                         "type": "string",
                         "description": "One sentence: what the run produces. The lead plans from this and nothing else."
                     },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Absolute path to the folder the run works in. Omit to use the session's own directory. The run reads and writes this folder only, and the answer echoes the path it resolved, so a mismatch is visible before the lead plans."
+                    },
                     "concurrency": {
                         "type": "integer",
                         "description": "How many tasks may hold a worker slot at once. Defaults to 4."
@@ -195,11 +199,35 @@ fn start(arguments: &Value) -> Result<Value, String> {
         return Err("`goal` is required: one sentence describing what the run produces".into());
     }
 
-    // The workspace is the session's own directory. A swarm that ran somewhere
-    // else would be editing a repository the user is not looking at.
-    let workspace = std::env::current_dir()
-        .map(|dir| dir.display().to_string())
-        .unwrap_or_default();
+    // The folder, named or inherited.
+    //
+    // Inheriting the session's directory is the right default — the run edits a
+    // repository the user is looking at — but it was the *only* option, and it
+    // is not the user's choice: the session directory comes from the app's
+    // remembered folder, so a stale one bound every run to a directory nobody
+    // named, with no way to say otherwise from here. A named folder is used
+    // exactly as given, after checking it exists, and the answer echoes it.
+    let named = arguments
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let workspace = match named {
+        Some(path) => {
+            let dir = std::path::Path::new(path);
+            if !dir.is_absolute() {
+                return Err(format!("`workspace` must be an absolute path, got {path:?}"));
+            }
+            if !dir.is_dir() {
+                return Err(format!("`workspace` is not a directory: {path}"));
+            }
+            path.to_string()
+        }
+        None => std::env::current_dir()
+            .map(|dir| dir.display().to_string())
+            .map_err(|error| format!("no `workspace` was named and the session has no directory: {error}"))?,
+    };
 
     let mut command = Command::start(goal, workspace);
     command.concurrency = arguments

@@ -487,11 +487,27 @@ struct Inner {
     /// the whole mechanism: the main window listens on the bare name, a member
     /// emits on `acp://notification/swarm/w-t1`, and the two never meet.
     scope: Option<String>,
+    /// Whether this bridge speaks for the window, and so may move the folder the
+    /// app remembers opening in.
+    ///
+    /// It used to be inferred from `scope.is_none()`, which was wrong twice. A
+    /// swarm member is scoped, so it could not; a catalogue probe is unscoped
+    /// and could — it runs in `%TEMP%ibedesk-catalog-probe`, and remembering
+    /// that made every later launch open there, and every swarm run bind to a
+    /// temp directory the user never named. The intent belongs to the caller,
+    /// not to an absence of scope.
+    remember: bool,
 }
 
 impl AcpBridge {
     pub fn new(app: AppHandle) -> Self {
-        Self::with_sink(Arc::new(app))
+        let mut bridge = Self::with_sink(Arc::new(app));
+        // `with_sink` has not spawned anything yet, so the only handle to the
+        // inner state is still unique here.
+        if let Some(inner) = Arc::get_mut(&mut bridge.inner) {
+            inner.remember = true;
+        }
+        bridge
     }
 
     /// A bridge that reports to an arbitrary sink.
@@ -518,6 +534,7 @@ impl AcpBridge {
                 inbound: AtomicU64::new(0),
                 open_tools: Mutex::new(HashSet::new()),
                 scope: None,
+                remember: false,
             }),
         }
     }
@@ -664,7 +681,13 @@ impl AcpBridge {
                 // deletes: after the thirteenth live run the header read
                 // `...\.vibe\worktreesun-...-t2`, a verifier's checkout that
                 // no longer existed. A scoped bridge is a member, not the user.
-                if self.inner.scope.is_none() {
+                //
+                // A probe is neither: the model catalogue opens a session in a
+                // scratch directory to read the levels of models the session is
+                // not on, and remembering *that* folder moved the user's
+                // workspace to `%TEMP%`. `remember` is set by the constructor
+                // the window uses and by nothing else.
+                if self.inner.remember {
                     crate::settings::remember_workspace(&workspace);
                 }
                 self.inner
