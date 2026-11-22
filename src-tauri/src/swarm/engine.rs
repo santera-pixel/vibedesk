@@ -3084,13 +3084,9 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
         if !expected || busy(&member.id) {
             continue;
         }
-        let Some(last) = member.last_at.as_deref() else {
+        let Some(idle) = silence_secs(member) else {
             continue;
         };
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(last) else {
-            continue;
-        };
-        let idle = (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds();
         if idle <= MEMBER_IDLE_LIMIT_SECS {
             continue;
         }
@@ -3257,13 +3253,9 @@ fn refresh_progress(sink: &Arc<dyn EventSink>, run: Run) -> Run {
         if member.state != MemberState::Working {
             continue;
         }
-        let Some(last) = member.last_at.as_deref() else {
+        let Some(idle) = silence_secs(member) else {
             continue;
         };
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(last) else {
-            continue;
-        };
-        let idle = (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds();
         if idle < LEAD_NUDGE_SECS {
             continue;
         }
@@ -4382,34 +4374,42 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
             } else if member_is_silent("lead", &run.lead) && run.lead.nudges < NUDGE_ATTEMPTS {
                 // No plan, and the lead is not thinking. Ask again rather than
                 // waiting out the idle limit on a turn that already ended.
+                let idle = silence_secs(&run.lead).unwrap_or(LEAD_NUDGE_SECS);
                 let mut next = run.clone();
                 next.plan_attempts += 1;
-                next.lead.nudges += 1;
-                next.lead.state = MemberState::Working;
-                next.lead.last_at = Some(now());
+                let why = charge_nudge(&mut next, "lead");
                 next.touch();
                 let _ = next.save();
                 write_run(&next);
                 emit(&sink, &next);
-                engine.post(
-                    BoardEntry::new(
+                engine.post(match &why {
+                    Some(why) => BoardEntry::new(
                         "engine",
-                        BoardKind::Note,
+                        BoardKind::Conflict,
                         format!(
-                            "no plan after {}s — asked the lead again ({} of {NUDGE_ATTEMPTS})",
-                            LEAD_NUDGE_SECS,
-                            next.lead.nudges
+                            "the lead has written no plan for {idle}s and cannot be asked again — {why}"
                         ),
                     )
                     .about("run"),
-                );
-                let inbox = inbox_dir(&next.id, "lead");
-                nudge_member(
-                    &sink,
-                    &next,
-                    "lead",
-                    roles::reminder_brief(&inbox.to_string_lossy()),
-                );
+                    None => BoardEntry::new(
+                        "engine",
+                        BoardKind::Note,
+                        format!(
+                            "no plan for {idle}s — asked the lead again (nudge {} of {NUDGE_ATTEMPTS}, plan revision {} of {PLAN_ATTEMPTS})",
+                            next.lead.nudges, next.plan_attempts
+                        ),
+                    )
+                    .about("run"),
+                });
+                if why.is_none() {
+                    let inbox = inbox_dir(&next.id, "lead");
+                    nudge_member(
+                        &sink,
+                        &next,
+                        "lead",
+                        roles::reminder_brief(&inbox.to_string_lossy()),
+                    );
+                }
                 changed = true;
             }
         }
@@ -4930,22 +4930,31 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                 let Some(task) = next.task(&task_id).cloned() else {
                     continue;
                 };
-                if let Some(member) = next.member_mut(&verifier) {
-                    member.nudges += 1;
-                    member.state = MemberState::Working;
-                    member.last_at = Some(now());
-                }
-                engine.post(
-                    BoardEntry::new(
+                let idle = next
+                    .member(&verifier)
+                    .and_then(silence_secs)
+                    .unwrap_or(LEAD_NUDGE_SECS);
+                let why = charge_nudge(&mut next, &verifier);
+                engine.post(match &why {
+                    Some(why) => BoardEntry::new(
                         "engine",
-                        BoardKind::Note,
+                        BoardKind::Conflict,
                         format!(
-                            "no verdict after {}s — asked {verifier} again",
-                            LEAD_NUDGE_SECS
+                            "{verifier} has ruled on nothing for {idle}s and cannot be asked again — {why}"
                         ),
                     )
                     .about(task_id.clone()),
-                );
+                    None => BoardEntry::new(
+                        "engine",
+                        BoardKind::Note,
+                        format!("no verdict for {idle}s — asked {verifier} again"),
+                    )
+                    .about(task_id.clone()),
+                });
+                if why.is_some() {
+                    changed = true;
+                    continue;
+                }
                 let inbox = inbox_dir(&next.id, &verifier);
                 nudge_member(
                     &sink,
@@ -4980,22 +4989,37 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                 let Some(task) = next.task(&task_id).cloned() else {
                     continue;
                 };
-                if let Some(member) = next.member_mut(&worker) {
-                    member.nudges += 1;
-                    member.state = MemberState::Working;
-                    member.last_at = Some(now());
-                }
-                engine.post(
-                    BoardEntry::new(
+                // Measured, and named. The board used to print the threshold it
+                // tripped — "no evidence after 180s" — as though it were the
+                // reading, so a worker silent for a thousand seconds and one
+                // silent for two hundred looked identical on the board.
+                let idle = next
+                    .member(&worker)
+                    .and_then(silence_secs)
+                    .unwrap_or(LEAD_NUDGE_SECS);
+                let why = charge_nudge(&mut next, &worker);
+                engine.post(match &why {
+                    Some(why) => BoardEntry::new(
                         "engine",
-                        BoardKind::Note,
+                        BoardKind::Conflict,
                         format!(
-                            "no evidence after {}s — asked {worker} again",
-                            LEAD_NUDGE_SECS
+                            "{worker} has posted no evidence for {idle}s and cannot be asked again — {why}"
                         ),
                     )
                     .about(task_id.clone()),
-                );
+                    None => BoardEntry::new(
+                        "engine",
+                        BoardKind::Note,
+                        format!(
+                            "no evidence for {idle}s — asked {worker} again (evidence clock {LEAD_NUDGE_SECS}s, wedged limit {MEMBER_IDLE_LIMIT_SECS}s)"
+                        ),
+                    )
+                    .about(task_id.clone()),
+                });
+                if why.is_some() {
+                    changed = true;
+                    continue;
+                }
                 let inbox = inbox_dir(&next.id, &worker);
                 nudge_member(
                     &sink,
@@ -6319,14 +6343,64 @@ fn pulse_of(member_id: &str) -> super::watch::Pulse {
     }
 }
 
+/// How long a member has been silent, in seconds, and `None` when it has no
+/// clock to read.
+///
+/// The one place the idleness of a member is computed. Three separate
+/// `last_at` deltas had grown in the loop, and the board lines that reported them
+/// printed the *threshold* instead of the reading — "no evidence after 180s" on
+/// every nudge, whatever the member had actually been quiet for.
+fn silence_secs(member: &Member) -> Option<i64> {
+    let last = member.last_at.as_deref()?;
+    let at = chrono::DateTime::parse_from_rfc3339(last).ok()?;
+    Some((chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds())
+}
+
+/// Why a nudge to this member cannot be delivered, and `None` when it can.
+fn undeliverable(run: &Run, member_id: &str) -> Option<String> {
+    let engine = engine();
+    let inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
+    if !inner.bridges.contains_key(member_id) {
+        return Some("its agent process is not running".to_string());
+    }
+    if run
+        .member(member_id)
+        .and_then(|m| m.session_id.as_ref())
+        .is_none()
+    {
+        return Some("it has no session to answer in".to_string());
+    }
+    None
+}
+
+/// Charge one nudge against a member, and reset its silence clock only when the
+/// nudge can actually reach it.
+///
+/// The clock is the point. `last_at` is a member's liveness evidence, and stamping
+/// it for a message nobody received is what let a dead agent look busy: the board
+/// said "asked again" while nothing had been sent, and the silence counter went
+/// back to zero every tick. A nudge that cannot be delivered also stops being
+/// retried — the answer to "the agent is not running" is a respawn, not another
+/// prompt — so the budget is spent here and the member is handed to that path.
+fn charge_nudge(run: &mut Run, member_id: &str) -> Option<String> {
+    let why = undeliverable(run, member_id);
+    if let Some(member) = run.member_mut(member_id) {
+        member.state = MemberState::Working;
+        match why {
+            None => {
+                member.nudges += 1;
+                member.last_at = Some(now());
+            }
+            Some(_) => member.nudges = NUDGE_ATTEMPTS,
+        }
+    }
+    why
+}
+
 fn member_is_silent(member_id: &str, member: &Member) -> bool {
-    let Some(last) = member.last_at.as_deref() else {
+    let Some(idle) = silence_secs(member) else {
         return false;
     };
-    let Ok(at) = chrono::DateTime::parse_from_rfc3339(last) else {
-        return false;
-    };
-    let idle = (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds();
     if idle < LEAD_NUDGE_SECS {
         return false;
     }
@@ -6906,6 +6980,71 @@ mod tests {
             quiet: Some(quiet),
             tool: true,
         }
+    }
+
+    /// The board line reports the silence it measured, not the threshold it
+    /// tripped.
+    ///
+    /// The audited run's board carries three entries for one worker in one
+    /// second, two of them restarts, and every nudge line reads "no evidence
+    /// after 180s" — because 180 was `LEAD_NUDGE_SECS` interpolated into the
+    /// sentence. The worker's real silence was far longer, and the number that
+    /// would have shown it was never printed or even computed at the call site.
+    #[test]
+    fn silence_is_measured_rather_than_assumed() {
+        let mut member = Member::new("w-t1", Role::Worker, "m");
+        assert_eq!(silence_secs(&member), None, "no clock, no reading");
+
+        member.last_at = Some(
+            (chrono::Utc::now() - chrono::Duration::seconds(1004)).to_rfc3339_opts(
+                chrono::SecondsFormat::Millis,
+                true,
+            ),
+        );
+        let idle = silence_secs(&member).unwrap();
+        assert!((1003..=1005).contains(&idle), "{idle}");
+        assert!(
+            idle > LEAD_NUDGE_SECS,
+            "1004s of silence must not be reported as the 180s threshold"
+        );
+    }
+
+    /// A nudge no one can receive does not reset the liveness clock.
+    ///
+    /// `last_at` is a member's liveness evidence. Stamping it before the send was
+    /// the difference between "the agent is not running" and "the agent is
+    /// thinking", and the audited run read the second when it was the first:
+    /// "w-t3 stopped responding — restarted it on t3" and "w-t3 could not get an
+    /// answer: the Vibe agent is not running" landed in the same second as the
+    /// nudge that had supposedly been delivered.
+    #[test]
+    fn a_nudge_that_cannot_be_delivered_does_not_reset_the_clock() {
+        let ago = (chrono::Utc::now() - chrono::Duration::seconds(1004)).to_rfc3339_opts(
+            chrono::SecondsFormat::Millis,
+            true,
+        );
+        let mut run = planning_run("undeliverable");
+        let mut worker = Member::new("w-t1", Role::Worker, "m");
+        worker.state = MemberState::Working;
+        worker.last_at = Some(ago.clone());
+        worker.session_id = Some("session-1".into());
+        run.members = vec![worker];
+
+        // No bridge is registered for this member in a test process, which is
+        // exactly the state the audited run's w-t3 was in.
+        let why = charge_nudge(&mut run, "w-t1");
+
+        assert!(why.is_some(), "the member cannot be reached");
+        let worker = run.member("w-t1").unwrap();
+        assert_eq!(
+            worker.last_at.as_deref(),
+            Some(ago.as_str()),
+            "the clock is untouched, so the silence is still 1004s"
+        );
+        assert_eq!(
+            worker.nudges, NUDGE_ATTEMPTS,
+            "and the budget is spent, so the tick does not retry a dead member"
+        );
     }
 
     /// A run with one task in `state`, owned by a worker that has been silent
