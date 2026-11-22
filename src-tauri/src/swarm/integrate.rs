@@ -87,6 +87,30 @@ pub fn integrate(git: &dyn Git, repo: &Path, run: &mut Run) -> IntegrationOutcom
             .clone()
             .unwrap_or_else(|| branch.clone());
 
+        // Authorship: every commit in the judged range has to belong to the
+        // task's worker. Without this the engine cannot tell a verifier's commit
+        // from its worker's, which is exactly how the audited run's `t2` branch
+        // ended at a commit the verifier made.
+        if let (Some(owner), Some(base)) = (task.owner.clone(), task.base_commit.clone()) {
+            let expected = worktree::identity(&owner).1;
+            match worktree::authors(git, repo, &base, &target) {
+                Ok(authors) => {
+                    if let Some(foreign) = authors.iter().find(|author| **author != expected) {
+                        run.integration.state = IntegrationState::Failed;
+                        return IntegrationOutcome::Error(format!(
+                            "{task_id}: a commit in {base}..{target} is authored by {foreign}, not {owner} ({expected}) — the verdict was earned on that tree, and this commit is not the worker's, so the engine will not integrate it"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    run.integration.state = IntegrationState::Failed;
+                    return IntegrationOutcome::Error(format!(
+                        "{task_id}: could not read the authorship of {base}..{target}: {error}"
+                    ));
+                }
+            }
+        }
+
         match worktree::merge(git, repo, &target) {
             Ok(MergeOutcome::Clean) => {
                 run.integration.merged.push(task_id.clone());
@@ -269,6 +293,45 @@ mod tests {
         assert_eq!(merges.len(), 2);
         assert!(merges[0].contains("swarm/run-1/t1"), "{}", merges[0]);
         assert!(merges[1].contains("swarm/run-1/t2"), "{}", merges[1]);
+    }
+
+    #[test]
+    fn a_commit_the_worker_did_not_author_is_refused() {
+        // The audited run's t2 branch ended at `e18875b`, a commit its verifier
+        // made. A path-based check cannot see that; authorship can.
+        let git = FakeGit::new();
+        git.on("merge --no-ff", Ok("ok"));
+        git.on("log --no-merges --format=%ae", Ok("v-t2@swarm.local\n"));
+        let mut t1 = verified("t1", &[], &["a"]);
+        t1.owner = Some("w-t1".into());
+        t1.base_commit = Some("base".into());
+        t1.verified_commit = Some("e18875b".into());
+        let mut run = run_with(vec![t1]);
+        let outcome = integrate(&git, &PathBuf::from("/tmp/repo"), &mut run);
+        let why = match outcome {
+            IntegrationOutcome::Error(why) => why,
+            _ => panic!("a foreign author must not integrate"),
+        };
+        assert!(why.contains("v-t2@swarm.local"), "{why}");
+        assert_eq!(run.integration.state, IntegrationState::Failed);
+    }
+
+    #[test]
+    fn the_workers_own_commits_integrate() {
+        // The rule must not refuse the work it exists to protect.
+        let git = FakeGit::new();
+        git.on("merge --no-ff", Ok("ok"));
+        git.on(
+            "log --no-merges --format=%ae",
+            Ok("w-t1@swarm.local\nw-t1@swarm.local\n"),
+        );
+        let mut t1 = verified("t1", &[], &["a"]);
+        t1.owner = Some("w-t1".into());
+        t1.base_commit = Some("base".into());
+        t1.verified_commit = Some("abc123".into());
+        let mut run = run_with(vec![t1]);
+        let outcome = integrate(&git, &PathBuf::from("/tmp/repo"), &mut run);
+        assert!(matches!(outcome, IntegrationOutcome::Merged { .. }));
     }
 
     #[test]

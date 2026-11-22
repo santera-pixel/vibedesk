@@ -514,6 +514,86 @@ pub fn choose(verdict: Verdict, options: &Value) -> Option<String> {
     found.and_then(id_of)
 }
 
+/// The git sub-commands that author a commit or move a ref.
+///
+/// Compared against the lowercased invocation.
+const GIT_WRITES: &[&str] = &[
+    "git add",
+    "git commit",
+    "git update-ref",
+    "git symbolic-ref",
+    "git branch -f",
+    "git branch -m",
+    "git checkout -b",
+    "git checkout -B",
+    "git switch -c",
+    "git switch -C",
+    "git reset",
+    "git restore",
+    "git stash",
+    "git cherry-pick",
+    "git rebase",
+    "git tag -f",
+    "git am",
+];
+
+/// Shell constructs that write a file.
+const SHELL_WRITES: &[&str] = &["sed -i", "tee ", "truncate", "sponge"];
+
+/// Why this request would author the change, when the role may not.
+///
+/// The policy table already refuses a verifier every `Effect::Write`, and that
+/// rule is unreachable in practice: every logged request in
+/// `run-20261122-131108-001` carried a bare `{"toolCall":{"toolCallId":…}}`, so
+/// `effects()` never produced a `Write`. Writes arrive as commands instead, and
+/// the command rule only knows *destruction* — push, reset --hard, rm -rf. A
+/// verifier that stages and commits is not destroying anything; it is repairing
+/// the thing it was asked to judge, which is inward damage the word list has no
+/// entry for.
+///
+/// The audited run, read from `permissions.jsonl`: six `redirection` allows
+/// between 13:31:07 and 13:34:07, then
+/// `command git add index.html src/style.css tools/t/shell.test.mjs` at 13:34:16,
+/// then a commit the verifier pushed its worker's branch onto (`e18875b`).
+fn authorship(role: Role, effects: &[Effect], scope: &Scope) -> Option<String> {
+    if !matches!(role, Role::Verifier | Role::Reflector) {
+        return None;
+    }
+    // A write into the run directory is the verdict channel: the brief tells a
+    // verifier to post its answer as a file there. Refusing that pair would stop
+    // the answer without stopping the edit.
+    let may_write = effects.iter().any(|effect| match effect {
+        Effect::Outside { root, .. } => is_inside(root, &scope.run_dir),
+        _ => false,
+    });
+    for effect in effects {
+        let Effect::Command { pattern, label } = effect else {
+            continue;
+        };
+        let text = format!("{pattern} {label}").to_ascii_lowercase();
+        if let Some(verb) = GIT_WRITES.iter().find(|verb| text.contains(*verb)) {
+            return Some(format!(
+                "a verifier that authors the change it judges is not a check — the worker/verifier split is the only reason a swarm costs more than a chat, so `{verb}` is the worker's job"
+            ));
+        }
+        if may_write {
+            continue;
+        }
+        if let Some(verb) = SHELL_WRITES.iter().find(|verb| text.contains(*verb)) {
+            return Some(format!(
+                "a verifier may not write files with `{verb}` — it can repair what it is judging, and then report a pass"
+            ));
+        }
+        if text.contains("redirection") {
+            return Some(
+                "a verifier may not redirect output into the worktree — it can repair what it is judging. Write the verdict into the inbox instead"
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
 /// Decide one permission request.
 ///
 /// A request is all-or-nothing, so one denied effect denies the request. The
@@ -547,8 +627,16 @@ pub fn decide_announced(
         }
     }
     let mut verdict = Verdict::Allow;
-    let mut reason = None;
+    // Authorship is refused before the effect loop, because the effect carrying
+    // it is a command and the command rule only knows destruction.
+    let mut reason = authorship(role, &effects, scope);
+    if reason.is_some() {
+        verdict = Verdict::Deny;
+    }
     for effect in &effects {
+        if verdict == Verdict::Deny {
+            break;
+        }
         if self::verdict(role, effect, scope) == Verdict::Deny {
             verdict = Verdict::Deny;
             reason = Some(match effect {
@@ -1064,6 +1152,105 @@ mod tests {
             "path_scope_root": root,
             "scope": "outside_directory"
         }])
+    }
+
+    /// Several effects in one request, the way a real request arrives: the
+    /// verdict channel is an outside-directory allow plus a redirection.
+    fn request_all(groups: &[Value]) -> Value {
+        let mut all = Vec::new();
+        for group in groups {
+            if let Some(items) = group.as_array() {
+                all.extend(items.iter().cloned());
+            }
+        }
+        request(Value::Array(all))
+    }
+
+    /* -------------------------------------------------------------- *
+     * Authorship: the verifier may not write what it judges
+     * -------------------------------------------------------------- */
+
+    /// The literal effect from `run-20261122-131108-001/permissions.jsonl`,
+    /// allowed at 13:34:16 to v-t2, followed by the commit `e18875b`.
+    #[test]
+    fn a_verifier_cannot_stage_the_change_it_judges() {
+        let effect = command("git add index.html src/style.css tools/t/shell.test.mjs");
+        let verifier = decide(Role::Verifier, &request(effect.clone()), &scope());
+        assert_eq!(
+            verifier.verdict,
+            Verdict::Deny,
+            "the audited run allowed this at 13:34:16"
+        );
+        assert_eq!(verifier.option.as_deref(), Some("reject_once"));
+        assert!(
+            verifier.sentence().contains("worker's job"),
+            "{}",
+            verifier.sentence()
+        );
+
+        // Staging is the worker's job, and stays allowed for the worker.
+        let worker = decide(Role::Worker, &request(effect), &scope());
+        assert_eq!(worker.verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn a_verifier_cannot_commit_or_move_a_ref() {
+        for pattern in [
+            "git commit -m x",
+            "git update-ref refs/heads/swarm/run-1/t2 e18875b",
+            "git branch -f swarm/run-1/t2 e18875b",
+            "git symbolic-ref HEAD refs/heads/swarm/run-1/t2",
+            "git checkout -B swarm/run-1/t2 e18875b",
+        ] {
+            let decision = decide(Role::Verifier, &request(command(pattern)), &scope());
+            assert_eq!(decision.verdict, Verdict::Deny, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn a_verifier_cannot_redirect_output_into_the_worktree() {
+        let decision = decide(
+            Role::Verifier,
+            &request(command("shell syntax requiring approval: redirection")),
+            &scope(),
+        );
+        assert_eq!(decision.verdict, Verdict::Deny);
+    }
+
+    #[test]
+    fn a_verifier_can_still_post_its_verdict() {
+        // The verdict channel arrives as exactly this pair. Refusing the pair
+        // would stop the answer, not the edit — the run's own log shows it at
+        // 13:38:15 and 13:38:26.
+        let decision = decide(
+            Role::Verifier,
+            &request_all(&[
+                outside("D:/VibeDesk/data/swarm/run-1/inbox/v-t2"),
+                command("shell syntax requiring approval: redirection"),
+            ]),
+            &scope(),
+        );
+        assert_eq!(decision.verdict, Verdict::Allow, "{}", decision.sentence());
+    }
+
+    #[test]
+    fn ordinary_commands_are_untouched_by_the_authorship_rule() {
+        // The rule must not turn a verifier into a role that cannot look.
+        for pattern in [
+            "git rev-parse HEAD",
+            "git branch -a -v",
+            "git ls-tree -r swarm/run-1/t2",
+            "git diff --stat",
+            "node --test",
+        ] {
+            let decision = decide(Role::Verifier, &request(command(pattern)), &scope());
+            assert_eq!(
+                decision.verdict,
+                Verdict::Allow,
+                "{pattern} — {}",
+                decision.sentence()
+            );
+        }
     }
 
     /* -------------------------------------------------------------- *

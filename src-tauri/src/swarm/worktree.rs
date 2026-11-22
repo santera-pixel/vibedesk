@@ -338,7 +338,49 @@ pub fn add_worktree(
         &["worktree", "add", "-b", branch, &path_str, base],
         repo,
     )
-    .map(|_| ())
+    .map(|_| ())?;
+    // The worktree's directory name is the member id, so every checkout commits
+    // under the member that owns it. Without this every commit in every worktree
+    // carried the machine-wide identity, and the audited run's verifier commit
+    // (`e18875b`) was indistinguishable from its worker's.
+    if let Some(member) = path.file_name().and_then(|name| name.to_str()) {
+        set_identity(git, path, member)?;
+    }
+    Ok(())
+}
+
+/// The git identity a member commits under.
+///
+/// A guard, not a security boundary: a worker that sets its own `GIT_AUTHOR_*`
+/// still wins. It catches the case that actually happened — a verifier
+/// committing into its worker's branch — which needed no forgery at all.
+pub fn identity(member: &str) -> (String, String) {
+    (format!("swarm-{member}"), format!("{member}@swarm.local"))
+}
+
+/// Point one worktree's git config at one member.
+pub fn set_identity(git: &dyn Git, path: &Path, member: &str) -> Result<(), String> {
+    let (name, email) = identity(member);
+    git.run(&["config", "user.name", &name], path)?;
+    git.run(&["config", "user.email", &email], path)?;
+    Ok(())
+}
+
+/// Every author email in `base..tip`, merge commits excluded.
+///
+/// Merge commits are excluded because `merge_deps` puts dependency merges in
+/// this range: without `--no-merges` a dependent task fails on its
+/// dependencies' merges, which is a false refusal of work it did not do.
+pub fn authors(git: &dyn Git, repo: &Path, base: &str, tip: &str) -> Result<Vec<String>, String> {
+    let out = git.run(
+        &["log", "--no-merges", "--format=%ae", &format!("{base}..{tip}")],
+        repo,
+    )?;
+    Ok(out
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
 }
 
 /// Create a detached worktree, for a verifier.
@@ -624,6 +666,35 @@ pub fn outside_grant(changed: &[String], granted: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The granted paths a branch never touched.
+///
+/// The other half of the grant check. [`outside_grant`] catches a worker that
+/// wrote where it was not allowed; this catches the one that did not write what
+/// it was asked for. The audited run's t2 is why: granted `index.html`,
+/// `src/style.css` and `tools/t/shell.test.mjs`, w-t2 committed
+/// `tools/browser.mjs` and `tools/check-module.mjs` instead — two files outside
+/// the grant and none of the three deliverables. The engine noted the breach and
+/// handed the branch to a verifier anyway, and the verifier responded by writing
+/// the three missing files herself and committing them onto the worker's branch.
+/// A judge asked to rule on a deliverable that is not there will supply it.
+pub fn untouched(granted: &[String], changed: &[String]) -> Vec<String> {
+    granted
+        .iter()
+        .filter(|path| !changed.iter().any(|c| c == *path))
+        .cloned()
+        .collect()
+}
+
+/// Whether a branch contains none of the paths the plan granted the task.
+///
+/// The refusal rule at handoff, in one place and testable without a repository.
+/// A worker that touched none of its grant has not delivered the task, whatever
+/// else is on the branch — and that is a question the engine can answer itself,
+/// so it must not spend a verifier turn asking it.
+pub fn delivered_nothing(granted: &[String], changed: &[String]) -> bool {
+    !granted.is_empty() && untouched(granted, changed).len() == granted.len()
+}
+
 /// Whether a worktree has uncommitted changes.
 ///
 /// This is how a dirtied base is detected. `git status --porcelain` prints one
@@ -832,9 +903,24 @@ mod tests {
         )
         .unwrap();
         let calls = git.calls();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].starts_with("worktree add -b swarm/run-1/t1"), "{}", calls[0]);
+        assert!(
+            calls[0].starts_with("worktree add -b swarm/run-1/t1"),
+            "{}",
+            calls[0]
+        );
         assert!(calls[0].ends_with("abc123"), "{}", calls[0]);
+        // Then the member's own identity. The checkout's directory name is the
+        // member id, so a commit made in this worktree is attributable: the
+        // audited run's verifier commit `e18875b` was indistinguishable from its
+        // worker's, because every worktree committed under the machine-wide
+        // identity.
+        assert_eq!(
+            calls[1..].to_vec(),
+            vec![
+                "config user.name swarm-w1".to_string(),
+                "config user.email w1@swarm.local".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1386,6 +1472,50 @@ mod tests {
     #[test]
     fn a_worker_that_committed_nothing_has_nothing_to_answer_for() {
         assert!(outside_grant(&[], &["src/a.js".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn a_branch_that_touched_none_of_the_grant_delivered_nothing() {
+        // The audited run's t2: granted index.html, src/style.css and
+        // tools/t/shell.test.mjs; w-t2 committed tools/browser.mjs and
+        // tools/check-module.mjs. Two files outside the grant, zero of three
+        // deliverables — and the engine handed it to a verifier, who wrote the
+        // three missing files herself and committed them onto the worker's
+        // branch.
+        let granted = vec![
+            "index.html".to_string(),
+            "src/style.css".to_string(),
+            "tools/t/shell.test.mjs".to_string(),
+        ];
+        let changed = vec![
+            "tools/browser.mjs".to_string(),
+            "tools/check-module.mjs".to_string(),
+        ];
+        assert!(delivered_nothing(&granted, &changed));
+        assert_eq!(
+            untouched(&granted, &changed),
+            granted,
+            "every granted path is named, so the retry can spell them out"
+        );
+    }
+
+    #[test]
+    fn a_branch_that_touched_one_granted_file_is_judged_not_refused() {
+        // Partial delivery is the verifier's question, not the engine's: the
+        // plan may grant a file the task turns out not to need, and a refusal on
+        // one untouched path would fail correct work.
+        let granted = vec!["index.html".to_string(), "src/style.css".to_string()];
+        let changed = vec!["index.html".to_string(), "tools/browser.mjs".to_string()];
+        assert!(!delivered_nothing(&granted, &changed));
+        assert_eq!(untouched(&granted, &changed), vec!["src/style.css".to_string()]);
+    }
+
+    #[test]
+    fn a_task_with_no_grant_is_never_refused_for_delivering_nothing() {
+        // Without a grant there is nothing to miss, and `untouched([], [])` is
+        // `[]` — which is "nothing missed" and "nothing granted" at once.
+        assert!(!delivered_nothing(&[], &[]));
+        assert!(!delivered_nothing(&[], &["src/a.js".to_string()]));
     }
 
     #[test]

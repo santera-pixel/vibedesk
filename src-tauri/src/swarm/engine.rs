@@ -4448,23 +4448,41 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                 // `changed_paths` skips merge commits, so the dependency
                 // branches `prepare_worker` merged in are not counted as the
                 // worker's work.
-                let out_of_grant = {
+                let (committed, out_of_grant) = {
                     let path = worktree::worktree_path(&next.id, &format!("w-{task_id}"));
                     let base = task
                         .base_commit
                         .clone()
                         .unwrap_or_else(|| next.integration.base.clone());
-                    worktree::changed_paths(&CommandGit, &path, &base)
-                        .map(|changed| worktree::outside_grant(&changed, &task.files))
-                        .unwrap_or_default()
+                    match worktree::changed_paths(&CommandGit, &path, &base) {
+                        Ok(committed) => {
+                            let outside = worktree::outside_grant(&committed, &task.files);
+                            (committed, outside)
+                        }
+                        // An unreadable branch is reported, not swallowed. An
+                        // empty list here is not "nothing outside the grant", it
+                        // is "no observation" — and the deliverable check below
+                        // treats it as the absence it is.
+                        Err(why) => {
+                            engine.post(
+                                BoardEntry::new(
+                                    "engine",
+                                    BoardKind::Conflict,
+                                    format!("w-{task_id}'s branch could not be read: {why}"),
+                                )
+                                .about(task_id),
+                            );
+                            (Vec::new(), Vec::new())
+                        }
+                    }
                 };
                 if !out_of_grant.is_empty() {
                     engine.post(
                         BoardEntry::new(
                             "engine",
-                            BoardKind::Note,
+                            BoardKind::Escalation,
                             format!(
-                                "w-{task_id} committed {} outside its grant: {}",
+                                "w-{task_id} committed {} outside its grant: {} — kept on the branch, the verifier rules on it",
                                 if out_of_grant.len() == 1 {
                                     "a file"
                                 } else {
@@ -4475,6 +4493,68 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                         )
                         .about(task_id),
                     );
+                }
+                // A branch that contains none of the granted paths has not
+                // delivered this task, whatever else it contains, and the engine
+                // knows that without asking anyone. Handing it to a verifier is
+                // what produced the audited run's worst defect: v-t2 was given a
+                // branch whose three granted files did not exist, wrote all three
+                // herself, committed them and repointed the worker's branch at
+                // her own commit so her tests would pass — then returned a
+                // failing verdict on a branch that now held her work.
+                //
+                // Nothing is deleted and no branch moves: the worker is told
+                // which paths the plan granted it, and the ceiling is the one a
+                // refused verdict answers to, because this is the same kind of
+                // event.
+                if worktree::delivered_nothing(&task.files, &committed) {
+                    let untouched = worktree::untouched(&task.files, &committed);
+                    let worker = format!("w-{task_id}");
+                    end_member_turn(
+                        &worker,
+                        next.member(&worker).and_then(|m| m.session_id.clone()),
+                    );
+                    let reason = format!(
+                        "none of the {} files the plan granted this task were touched — missing: {}; committed instead: {}",
+                        task.files.len(),
+                        untouched.join(", "),
+                        if committed.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            committed.join(", ")
+                        }
+                    );
+                    engine.post(
+                        BoardEntry::new(
+                            "engine",
+                            BoardKind::Escalation,
+                            format!(
+                                "w-{task_id} delivered none of its granted files, so the handoff was refused — {reason}"
+                            ),
+                        )
+                        .about(task_id),
+                    );
+                    let refused = Verdict {
+                        passed: false,
+                        reason,
+                        evidence: committed.clone(),
+                        command: None,
+                        base_exit: None,
+                        change_exit: None,
+                        failing_first: false,
+                        base_dirtied: false,
+                        at: now(),
+                    };
+                    let ceiling = next.max_attempts;
+                    if let Some(task) = next.task_mut(task_id) {
+                        task.out_of_grant = out_of_grant;
+                        let _ = schedule::apply_verdict(task, refused, ceiling);
+                    }
+                    next.touch();
+                    let _ = next.save();
+                    write_run(&next);
+                    emit(&sink, &next);
+                    continue;
                 }
                 // Pin the tree the verdict will be about. The verifier reads the
                 // branch, and a branch is a pointer anything with a shell can
@@ -4589,19 +4669,15 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                 // criterion was written for. Against the run's base a dependent
                 // task's test fails only because its dependency is missing, which
                 // is a proof of nothing.
-                let base_checkout = match task.base_commit.clone() {
-                    Some(commit) => {
-                        let path = worktree::task_base_path(&next.id, task_id);
-                        let workspace = PathBuf::from(&next.workspace);
-                        // Creates it, or resets it if the verifier left something
-                        // in it: a base carrying the verifier's own edit is a base
-                        // that can make a real failure look like a pass.
-                        let _ = worktree::ensure_detached(&CommandGit, &workspace, &path, &commit);
-                        path
-                    }
-                    // A run adopted from disk before per-task bases existed.
-                    None => worktree::base_checkout_path(&next.id),
-                };
+                // Read the baseline's dirtiness *before* the reset below. The
+                // reset exists so a verifier's leftover edit cannot make a real
+                // failure look like a pass — and because it ran first, the check
+                // that followed it always found a clean tree. `base_dirtied` is
+                // the clause that says "this verdict measured a baseline the
+                // verifier changed"; `Verdict::is_earned` refuses on it, and it
+                // had no way to become true except in the seconds between the
+                // reset and the proof.
+                let (base_checkout, base_dirtied_before) = base_checkout_for(&next, task);
                 let change = worktree::worktree_path(&next.id, &format!("w-{task_id}"));
                 // The criterion is the command. A verifier that names no
                 // `command` is not exempt from the failing-first check: the
@@ -4673,8 +4749,11 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
 
                 // A verifier that wrote to the base checkout has changed the
                 // thing it was measuring. Detected, not prevented: git cannot
-                // make a checkout read-only.
-                let base_dirtied = worktree::is_dirty(&CommandGit, &base_checkout).unwrap_or(false);
+                // make a checkout read-only. Two observations, because there are
+                // two windows — what it left behind on an earlier turn (read
+                // before the reset above) and what it wrote during this one.
+                let base_dirtied =
+                    base_dirtied_before || worktree::is_dirty(&CommandGit, &base_checkout).unwrap_or(false);
 
                 if let Some(note) = &proof.note {
                     engine.post(
@@ -5930,8 +6009,32 @@ fn read_plan(run: &Run) -> Option<Plan> {
     Some(plan)
 }
 
-/// The run after the gate accepted a plan.
+/// The tree a task's criterion is proven against on the base side, and whether it
+/// was already dirty when this call found it.
 ///
+/// The dirtiness has to be read *before* the reset, not after: `ensure_detached`
+/// throws away whatever the verifier left in the checkout, and that leftover is
+/// the evidence. Checking afterwards found a clean tree every time, so
+/// `Verdict::is_earned`'s `base_dirtied` clause could only fire if the verifier
+/// wrote during the proof itself.
+fn base_checkout_for(run: &Run, task: &Task) -> (PathBuf, bool) {
+    match task.base_commit.clone() {
+        Some(commit) => {
+            let path = worktree::task_base_path(&run.id, &task.id);
+            let workspace = PathBuf::from(&run.workspace);
+            let dirtied = worktree::is_dirty(&CommandGit, &path).unwrap_or(false);
+            // Creates it, or resets it if the verifier left something in it: a
+            // base carrying the verifier's own edit is a base that can make a
+            // real failure look like a pass.
+            let _ = worktree::ensure_detached(&CommandGit, &workspace, &path, &commit);
+            (path, dirtied)
+        }
+        // A run adopted from disk before per-task bases existed. Its checkout is
+        // not reset here, so the caller's later read is the one that counts.
+        None => (worktree::base_checkout_path(&run.id), false),
+    }
+}
+
 /// The criteria that already pass on the commit the run starts from.
 ///
 /// `plan::validate` is pure — it reads the plan and nothing else — so the one plan
@@ -6523,6 +6626,80 @@ fn unreachable_from(declared: &[String]) -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::swarm::{Integration, Reflection, Task};
+
+    /// The report that failed the audited run and could never have passed.
+    ///
+    /// `base_checkout_for` resets the base checkout before the criterion is
+    /// proven, so a verifier's leftover edit can never make a real failure look
+    /// like a pass. The `base_dirtied` read that followed the reset found a clean
+    /// tree every time, which made `Verdict::is_earned`'s clause dead: the only
+    /// way it could fire was a write during the proof itself. Reading before the
+    /// reset is what gives the clause a way to be true.
+    #[test]
+    fn a_base_the_verifier_left_dirty_is_reported_before_the_reset_hides_it() {
+        use std::process::Command;
+
+        let workspace =
+            std::env::temp_dir().join(format!("vd-dirtied-base-{}", super::super::new_run_id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&workspace)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "base@local"]);
+        git(&["config", "user.name", "base"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "core.autocrlf", "false"]);
+        std::fs::write(workspace.join("base.txt"), "base\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+
+        let run = Run::new(
+            "dirtied base",
+            workspace.to_string_lossy().to_string(),
+            Member::new("lead", Role::Lead, "m"),
+        );
+        let mut task = Task::new("t1", "One", "Do it.", "node --test test/a.test.js")
+            .with_files(&["src/a.js"]);
+        task.base_commit = Some(base.clone());
+
+        // The verifier entered its base checkout — it has to, the failing-first
+        // proof runs there — and left an edit behind.
+        let checkout = worktree::task_base_path(&run.id, "t1");
+        worktree::ensure_detached(&CommandGit, &workspace, &checkout, &base).unwrap();
+        std::fs::write(checkout.join("planted.txt"), "the verifier wrote this\n").unwrap();
+        assert!(
+            worktree::is_dirty(&CommandGit, &checkout).unwrap(),
+            "the checkout starts dirty"
+        );
+
+        let (path, dirtied) = super::base_checkout_for(&run, &task);
+
+        assert!(dirtied, "the dirty baseline was observed before the reset");
+        assert_eq!(path, checkout, "and it is the task's own base");
+        assert!(
+            !worktree::is_dirty(&CommandGit, &path).unwrap(),
+            "the reset still happened, so the proof measures the commit"
+        );
+        assert!(
+            !path.join("planted.txt").exists(),
+            "the verifier's file is gone from the baseline"
+        );
+
+        let problems = worktree::release_run(&CommandGit, &workspace, &run.id);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
 
     /// A verifier's escalation is about the criterion, so the *worker* runs
     /// again — the verifier does not go back to work.
