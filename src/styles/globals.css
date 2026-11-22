@@ -1,0 +1,887 @@
+@import '../assets/fonts/fonts.css';
+@import 'tailwindcss';
+
+/* ------------------------------------------------------------------ *
+ * VibeDesk design tokens
+ *
+ * Two themes, one geometry. Colour is capped at a warm graphite base,
+ * one hot orange accent, and three semantic hues that only appear when
+ * they carry meaning (warn / danger / info). Gloss is a light source
+ * above the object, not frosted glass: a specular top edge on raised
+ * surfaces, one warm sheen on the title bar, one glow on the primary
+ * action. See DESIGN.md for the direction and the dose caps.
+ * ------------------------------------------------------------------ */
+
+@theme {
+  /* Every Tailwind `transition-*` utility draws its duration and curve from
+     the app's two motion tokens, so a utility class cannot introduce a
+     duration the motion language does not have. */
+  --default-transition-duration: var(--vd-dur-1);
+  --default-transition-timing-function: var(--vd-ease);
+
+  --font-sans: 'Instrument Sans', 'Segoe UI Variable Text', system-ui, sans-serif;
+  --font-serif: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, monospace;
+
+  --text-micro: 0.6875rem;
+  --text-meta: 0.78125rem;
+  --text-ui: 0.84375rem;
+  --text-body: 0.9375rem;
+  --text-lead: 1.0625rem;
+
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Layout tokens
+ *
+ * Widths and vertical rhythm live here rather than inside component
+ * classes, so `layout.json` can move them at runtime. `applyLayout`
+ * writes the same names as inline properties on <html>, which outranks
+ * this block — that is the whole mechanism, no re-render involved.
+ * ------------------------------------------------------------------ */
+
+:root {
+  --vd-rail-w: 48px;
+  --vd-sidebar-w: 252px;
+  --vd-transcript-max: 720px;
+  --vd-composer-max: 720px;
+  --vd-density: 1;
+}
+
+:root,
+[data-theme='ink'] {
+  color-scheme: dark;
+
+  --vd-canvas: #0c0a09;
+  --vd-canvas-raised: #131010;
+  --vd-surface: #191514;
+  --vd-surface-hover: #201b19;
+  --vd-surface-sunken: #100d0c;
+  --vd-overlay: #1c1715;
+
+  --vd-line: #2b2422;
+  --vd-line-soft: #201b19;
+  --vd-line-strong: #3d332f;
+
+  --vd-text: #f2ede8;
+  --vd-text-secondary: #a89e96;
+  --vd-text-tertiary: #6f655e;
+  --vd-text-inverse: #0c0a09;
+
+  --vd-accent: #ff7a1a;
+  --vd-accent-strong: #ff9445;
+  --vd-accent-dim: #4a2a12;
+  --vd-accent-wash: rgba(255, 122, 26, 0.1);
+  --vd-on-accent: #1a0c00;
+
+  --vd-warn: #e0b062;
+  --vd-warn-wash: rgba(224, 176, 98, 0.11);
+  --vd-danger: #e07a6e;
+  --vd-danger-wash: rgba(224, 122, 110, 0.11);
+  --vd-info: #8fb0d4;
+  --vd-info-wash: rgba(143, 176, 212, 0.1);
+  --vd-ok: #7fae8a;
+  --vd-ok-wash: rgba(127, 174, 138, 0.11);
+
+  /* Gloss: a light source above the object, not frosted glass. */
+  --vd-gloss-edge: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  --vd-gloss-warm: inset 0 1px 0 rgba(255, 160, 80, 0.07);
+  --vd-sheen: linear-gradient(180deg, rgba(255, 122, 26, 0.035), transparent 140px);
+  --vd-glow-accent: 0 0 0 1px rgba(255, 122, 26, 0.28), 0 6px 20px -8px rgba(255, 122, 26, 0.45);
+
+  --vd-shadow-card: var(--vd-gloss-edge), 0 1px 2px rgba(0, 0, 0, 0.45);
+  --vd-shadow-pop:
+    var(--vd-gloss-edge), 0 18px 40px -18px rgba(0, 0, 0, 0.8), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --vd-grain: 0.028;
+}
+
+[data-theme='paper'] {
+  color-scheme: light;
+
+  --vd-canvas: #f5f3ee;
+  --vd-canvas-raised: #fbfaf6;
+  --vd-surface: #ffffff;
+  --vd-surface-hover: #f7f5f0;
+  --vd-surface-sunken: #efece4;
+  --vd-overlay: #ffffff;
+
+  --vd-line: #e0dcd1;
+  --vd-line-soft: #eae6dc;
+  --vd-line-strong: #cbc5b6;
+
+  --vd-text: #1a1c19;
+  --vd-text-secondary: #5b615a;
+  --vd-text-tertiary: #8b9088;
+  --vd-text-inverse: #fbfaf6;
+
+  --vd-accent: #c2410c;
+  --vd-accent-strong: #9a3412;
+  --vd-accent-dim: #f3d3c0;
+  --vd-accent-wash: rgba(194, 65, 12, 0.08);
+  --vd-on-accent: #fff8f3;
+
+  --vd-warn: #9a6b1f;
+  --vd-warn-wash: rgba(154, 107, 31, 0.09);
+  --vd-danger: #a8443c;
+  --vd-danger-wash: rgba(168, 68, 60, 0.08);
+  --vd-info: #3c5f85;
+  --vd-info-wash: rgba(60, 95, 133, 0.08);
+  --vd-ok: #3f7a52;
+  --vd-ok-wash: rgba(63, 122, 82, 0.09);
+
+  --vd-gloss-edge: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  --vd-gloss-warm: inset 0 1px 0 rgba(194, 65, 12, 0.06);
+  --vd-sheen: linear-gradient(180deg, rgba(194, 65, 12, 0.025), transparent 140px);
+  --vd-glow-accent: 0 0 0 1px rgba(194, 65, 12, 0.22), 0 6px 18px -8px rgba(194, 65, 12, 0.3);
+
+  --vd-shadow-card: var(--vd-gloss-edge), 0 1px 2px rgba(26, 28, 25, 0.06);
+  --vd-shadow-pop:
+    var(--vd-gloss-edge), 0 20px 44px -22px rgba(26, 28, 25, 0.35), 0 2px 6px rgba(26, 28, 25, 0.08);
+  --vd-grain: 0.014;
+}
+
+@layer base {
+  * {
+    border-color: var(--vd-line);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--vd-canvas);
+    color: var(--vd-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-ui);
+    line-height: 1.55;
+    font-feature-settings:
+      'ss01' 1,
+      'cv01' 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: var(--vd-accent-dim);
+    color: var(--vd-text);
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--vd-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--vd-line-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--vd-text-tertiary);
+    background-clip: content-box;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Typographic primitives
+ * ------------------------------------------------------------------ */
+
+.vd-wordmark {
+  font-family: var(--font-serif);
+  font-size: 1.375rem;
+  letter-spacing: -0.015em;
+  line-height: 1;
+}
+
+.vd-display {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+}
+
+.vd-label {
+  font-size: var(--text-micro);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--vd-text-tertiary);
+}
+
+.vd-meta {
+  font-size: var(--text-meta);
+  color: var(--vd-text-secondary);
+}
+
+.vd-numeric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Surfaces
+ * ------------------------------------------------------------------ */
+
+.vd-panel {
+  background: var(--vd-canvas-raised);
+  border: 1px solid var(--vd-line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--vd-gloss-edge);
+}
+
+/* Glass without a backdrop pass. A translucent fill plus a 1 px specular
+   inset reads the same at this scale, and unlike `backdrop-filter` it costs
+   nothing per pixel — no copy of the backdrop, no separate filter pass. */
+.vd-gloss {
+  background: color-mix(in oklab, var(--vd-surface) 82%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    var(--vd-shadow-pop);
+}
+
+.vd-card {
+  background: var(--vd-surface);
+  border: 1px solid var(--vd-line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--vd-shadow-card);
+}
+
+.vd-card-interactive {
+  transition: transform var(--vd-fast) var(--vd-ease);
+}
+.vd-card-interactive:hover {
+  border-color: var(--vd-line-strong);
+  background: var(--vd-surface-hover);
+  transform: translateY(-1px);
+}
+
+/* The one warm sheen in the interface: the title bar, as if lit from above. */
+.vd-sheen {
+  background-image: var(--vd-sheen);
+}
+
+/* The composer is the focal surface, so it carries the warm gloss edge. Focus
+   adds a ring only — the bloom stays reserved for the primary action. */
+.vd-composer-shell {
+  box-shadow: var(--vd-gloss-warm), var(--vd-shadow-card);
+}
+.vd-composer-shell:focus-within {
+  box-shadow:
+    var(--vd-gloss-warm),
+    var(--vd-shadow-card),
+    0 0 0 1px color-mix(in oklab, var(--vd-accent) 30%, transparent);
+}
+
+.vd-hairline {
+  height: 1px;
+  background: var(--vd-line-soft);
+}
+
+/* ------------------------------------------------------------------ *
+ * Controls
+ * ------------------------------------------------------------------ */
+
+.vd-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 30px;
+  padding: 0 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--vd-line);
+  background: var(--vd-surface);
+  color: var(--vd-text-secondary);
+  font-size: var(--text-meta);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: transform var(--vd-fast) var(--vd-ease);
+}
+.vd-btn:hover:not(:disabled) {
+  color: var(--vd-text);
+  background: var(--vd-surface-hover);
+  border-color: var(--vd-line-strong);
+}
+/* One press physics for every button in the app. */
+.vd-btn:active:not(:disabled) {
+  transform: translateY(0.5px) scale(0.995);
+}
+.vd-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.vd-btn-primary {
+  background: var(--vd-accent);
+  border-color: transparent;
+  color: var(--vd-on-accent);
+  font-weight: 600;
+  box-shadow: var(--vd-gloss-warm);
+}
+/* The one glow in the interface: the primary action, on hover only. */
+.vd-btn-primary:hover:not(:disabled) {
+  background: var(--vd-accent-strong);
+  color: var(--vd-on-accent);
+  border-color: transparent;
+  box-shadow: var(--vd-glow-accent);
+}
+
+.vd-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.vd-btn-ghost:hover:not(:disabled) {
+  background: var(--vd-surface-hover);
+  border-color: transparent;
+}
+
+.vd-btn-danger {
+  color: var(--vd-danger);
+  border-color: color-mix(in oklab, var(--vd-danger) 32%, transparent);
+  background: var(--vd-danger-wash);
+}
+.vd-btn-danger:hover:not(:disabled) {
+  color: var(--vd-danger);
+  background: color-mix(in oklab, var(--vd-danger) 18%, transparent);
+  border-color: color-mix(in oklab, var(--vd-danger) 48%, transparent);
+}
+
+.vd-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--vd-text-tertiary);
+}
+.vd-icon-btn:hover {
+  color: var(--vd-text);
+  background: var(--vd-surface-hover);
+}
+
+.vd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 21px;
+  padding: 0 0.45rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--vd-line);
+  background: var(--vd-surface-sunken);
+  color: var(--vd-text-secondary);
+  font-size: var(--text-micro);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.vd-chip-accent {
+  color: var(--vd-accent);
+  border-color: color-mix(in oklab, var(--vd-accent) 26%, transparent);
+  background: var(--vd-accent-wash);
+}
+.vd-chip-warn {
+  color: var(--vd-warn);
+  border-color: color-mix(in oklab, var(--vd-warn) 26%, transparent);
+  background: var(--vd-warn-wash);
+}
+.vd-chip-danger {
+  color: var(--vd-danger);
+  border-color: color-mix(in oklab, var(--vd-danger) 26%, transparent);
+  background: var(--vd-danger-wash);
+}
+
+.vd-kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--vd-line);
+  border-bottom-width: 2px;
+  background: var(--vd-surface-sunken);
+  color: var(--vd-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.vd-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: var(--vd-text);
+  font-size: var(--text-body);
+  line-height: 1.6;
+}
+.vd-input::placeholder {
+  color: var(--vd-text-tertiary);
+}
+
+.vd-switch {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: 999px;
+  border: 1px solid var(--vd-line-strong);
+  background: var(--vd-surface-sunken);
+}
+.vd-switch[data-on='true'] {
+  background: var(--vd-accent);
+  border-color: transparent;
+}
+.vd-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--vd-text-tertiary);
+  transition: transform var(--vd-fast) var(--vd-ease);
+}
+.vd-switch[data-on='true']::after {
+  transform: translateX(13px);
+  background: var(--vd-on-accent);
+}
+
+/* ------------------------------------------------------------------ *
+ * Chat transcript
+ * ------------------------------------------------------------------ */
+
+/* A row that is scrolled out of view stops being painted and its layer is
+   discarded. `contain-intrinsic-size: auto` remembers the height a row had
+   the first time it rendered, so the 80 px estimate is used once per row and
+   never again — which is what keeps the scrollbar from jumping on the way
+   back up. This is the largest single cost in the app and it is one rule. */
+.vd-row {
+  content-visibility: auto;
+  /* `auto` remembers the height a row had the first time it rendered, so the
+     estimate is used once per row and never again. The estimate itself is the
+     median of what has rendered in this chat, measured by `Transcript` and
+     written to the scroller — 80px is only the fallback for a chat too short to
+     have a median. */
+  contain-intrinsic-size: auto var(--vd-row-h, 80px);
+}
+
+.vd-prose {
+  font-size: var(--text-body);
+  line-height: 1.68;
+  color: var(--vd-text);
+  overflow-wrap: anywhere;
+}
+.vd-prose > * + * {
+  margin-top: calc(0.85em * var(--vd-density));
+}
+.vd-prose h1,
+.vd-prose h2,
+.vd-prose h3,
+.vd-prose h4 {
+  font-weight: 600;
+  letter-spacing: -0.011em;
+  line-height: 1.3;
+  margin-top: 1.5em;
+}
+.vd-prose h1 {
+  font-size: 1.32em;
+}
+.vd-prose h2 {
+  font-size: 1.16em;
+}
+.vd-prose h3 {
+  font-size: 1.02em;
+}
+.vd-prose h4 {
+  font-size: 0.95em;
+  color: var(--vd-text-secondary);
+}
+.vd-prose p {
+  margin: 0;
+}
+.vd-prose strong {
+  font-weight: 600;
+  color: var(--vd-text);
+}
+.vd-prose em {
+  font-style: italic;
+}
+.vd-prose a {
+  color: var(--vd-accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--vd-accent) 40%, transparent);
+  text-underline-offset: 2px;
+}
+.vd-prose a:hover {
+  text-decoration-color: var(--vd-accent);
+}
+.vd-prose ul,
+.vd-prose ol {
+  padding-left: 1.15em;
+  margin: 0;
+}
+.vd-prose ul {
+  list-style: none;
+}
+.vd-prose ul > li {
+  position: relative;
+}
+.vd-prose ul > li::before {
+  content: '';
+  position: absolute;
+  left: -0.85em;
+  top: 0.68em;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--vd-text-tertiary);
+}
+.vd-prose ol {
+  list-style: decimal;
+}
+.vd-prose ol > li::marker {
+  color: var(--vd-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9em;
+}
+.vd-prose li + li {
+  margin-top: 0.3em;
+}
+.vd-prose blockquote {
+  border-left: 2px solid var(--vd-line-strong);
+  padding-left: 0.9em;
+  color: var(--vd-text-secondary);
+  font-style: italic;
+}
+.vd-prose hr {
+  border: none;
+  height: 1px;
+  background: var(--vd-line);
+  margin: 1.6em 0;
+}
+.vd-prose code:not(pre code) {
+  font-family: var(--font-mono);
+  font-size: 0.855em;
+  padding: 0.12em 0.34em;
+  border-radius: 4px;
+  background: var(--vd-surface-sunken);
+  border: 1px solid var(--vd-line-soft);
+  color: var(--vd-text);
+  white-space: nowrap;
+}
+.vd-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92em;
+  border: 1px solid var(--vd-line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.vd-prose th {
+  text-align: left;
+  font-weight: 600;
+  font-size: var(--text-meta);
+  letter-spacing: 0.02em;
+  color: var(--vd-text-secondary);
+  background: var(--vd-surface-sunken);
+  padding: 0.5em 0.7em;
+  border-bottom: 1px solid var(--vd-line);
+}
+.vd-prose td {
+  padding: 0.5em 0.7em;
+  border-bottom: 1px solid var(--vd-line-soft);
+  vertical-align: top;
+}
+.vd-prose tr:last-child td {
+  border-bottom: none;
+}
+
+/* Streaming caret */
+.vd-caret::after {
+  content: '';
+  display: inline-block;
+  width: 0.42em;
+  height: 1.02em;
+  margin-left: 0.12em;
+  vertical-align: -0.16em;
+  background: var(--vd-accent);
+  border-radius: 1px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Code
+ * ------------------------------------------------------------------ */
+
+.vd-code {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.62;
+  tab-size: 2;
+}
+
+.vd-code-scroll {
+  overflow: auto;
+  max-height: 460px;
+}
+
+.hljs {
+  color: var(--vd-text);
+  background: transparent;
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--vd-text-tertiary);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal {
+  color: #ff9d7a;
+}
+[data-theme='paper'] .hljs-keyword,
+[data-theme='paper'] .hljs-selector-tag,
+[data-theme='paper'] .hljs-literal {
+  color: #b03a1a;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: #b8d18a;
+}
+[data-theme='paper'] .hljs-string,
+[data-theme='paper'] .hljs-regexp,
+[data-theme='paper'] .hljs-addition {
+  color: #4a6b2f;
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet {
+  color: #e8c07a;
+}
+[data-theme='paper'] .hljs-number,
+[data-theme='paper'] .hljs-symbol,
+[data-theme='paper'] .hljs-bullet {
+  color: #8a5a12;
+}
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #86a9cf;
+}
+[data-theme='paper'] .hljs-title,
+[data-theme='paper'] .hljs-section,
+[data-theme='paper'] .hljs-name,
+[data-theme='paper'] .hljs-selector-id,
+[data-theme='paper'] .hljs-selector-class {
+  color: #2f5a80;
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable {
+  color: #d9a3c4;
+}
+[data-theme='paper'] .hljs-attr,
+[data-theme='paper'] .hljs-attribute,
+[data-theme='paper'] .hljs-variable,
+[data-theme='paper'] .hljs-template-variable {
+  color: #7a4a8c;
+}
+.hljs-built_in,
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-function .hljs-title {
+  color: #e8c07a;
+}
+[data-theme='paper'] .hljs-built_in,
+[data-theme='paper'] .hljs-type,
+[data-theme='paper'] .hljs-class .hljs-title,
+[data-theme='paper'] .hljs-function .hljs-title {
+  color: #8a5a12;
+}
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: var(--vd-text-tertiary);
+}
+.hljs-deletion {
+  color: var(--vd-danger);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
+.vd-menu {
+  position: fixed;
+  z-index: 60;
+  padding: 4px 0;
+  border: 1px solid var(--vd-line-strong);
+  border-radius: var(--radius-md);
+  background: var(--vd-overlay);
+  box-shadow: var(--vd-shadow-pop);
+  animation: vd-enter var(--vd-fast) var(--vd-ease-land) both;
+}
+.vd-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  text-align: left;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--vd-text-secondary);
+}
+.vd-menu-item:hover:not(:disabled) {
+  background: var(--vd-surface-hover);
+  color: var(--vd-text);
+}
+.vd-menu-item:disabled {
+  opacity: 0.4;
+}
+.vd-menu-item-danger:hover:not(:disabled) {
+  color: var(--vd-danger);
+}
+.vd-menu-shortcut {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--vd-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.vd-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--vd-line-soft);
+}
+
+/* A placeholder is a shape, not a light show. It holds the space the content
+   will take and nothing else. */
+.vd-skeleton {
+  background: var(--vd-surface-sunken);
+  border-radius: 4px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Workstation rail: width, side, collapse, resize strip
+ * ------------------------------------------------------------------ */
+
+.vd-sidebar {
+  position: relative;
+  width: var(--vd-sidebar-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--vd-line);
+  background: var(--vd-canvas-raised);
+}
+
+[data-sidebar-side='left'] .vd-sidebar {
+  order: -1;
+  border-left: 0;
+  border-right: 1px solid var(--vd-line);
+}
+
+[data-sidebar-collapsed='true'] .vd-sidebar {
+  display: none;
+}
+
+.vd-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
+}
+[data-sidebar-side='right'] .vd-resize {
+  left: -4px;
+}
+[data-sidebar-side='left'] .vd-resize {
+  right: -4px;
+}
+.vd-resize:hover,
+.vd-resize[data-dragging='true'],
+.vd-resize:focus-visible {
+  background: color-mix(in oklab, var(--vd-accent) 38%, transparent);
+}
+.vd-resize:focus-visible {
+  outline: 2px solid var(--vd-accent);
+  outline-offset: -1px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Diff
+ * ------------------------------------------------------------------ */
+
+.vd-diff-line {
+  display: grid;
+  grid-template-columns: 2.6rem 1fr;
+  font-family: var(--font-mono);
+  font-size: 0.79rem;
+  line-height: 1.55;
+}
+.vd-diff-add {
+  background: color-mix(in oklab, var(--vd-accent) 11%, transparent);
+}
+.vd-diff-del {
+  background: color-mix(in oklab, var(--vd-danger) 11%, transparent);
+}
+.vd-diff-gutter {
+  color: var(--vd-text-tertiary);
+  text-align: right;
+  padding-right: 0.6rem;
+  user-select: none;
+  border-right: 1px solid var(--vd-line-soft);
+}
+
+/* ------------------------------------------------------------------ *
+ * Mermaid
+ * ------------------------------------------------------------------ */
+
+.vd-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+.vd-diagram .nodeLabel,
+.vd-diagram .edgeLabel,
+.vd-diagram .label {
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+}

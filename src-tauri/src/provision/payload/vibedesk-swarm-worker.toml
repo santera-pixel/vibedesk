@@ -1,0 +1,4 @@
+display_name = "VibeDesk Swarm Worker"
+description = "Implements one task in its own worktree and stops when it is done."
+safety = "neutral"
+system_prompt_id = "vibedesk-swarm-worker"

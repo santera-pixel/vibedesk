@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-11-21-plan-polish",
+  "lastCheckpointRef": "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json",
+  "resumeInstruction": "Re-read docs/PLAN-polish.md Verification section and 20-checkpoint.md; worktree is authority; not a git repo",
+  "knownPartialWork": [
+    "t1 stop_process deadlock; t2 retire_verifier; t3 AmendError::NoOp; t4 scratch briefs; t5 one-wide send-back; t6 destructive() quote-aware; t7 denial message; t8 live process count in panel + live_count; t9 checkout retention (reap, keep 10); t10 game.sh builds first"
+  ],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-11-21-plan-polish/10-intent.md",
+    "docs/aegis/work/2026-11-21-plan-polish/20-checkpoint.md",
+    "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": [
+    "full-suite not re-run after t7 (CPU); targeted swarm+acp coverage is the evidence; battletests::efficiency and channel::window are environment-flaky, untouched by this diff"
+  ]
+}

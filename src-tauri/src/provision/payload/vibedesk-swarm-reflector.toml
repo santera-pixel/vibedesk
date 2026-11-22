@@ -1,0 +1,4 @@
+display_name = "VibeDesk Swarm Reflector"
+description = "Records what the next run in this workspace should know."
+safety = "neutral"
+system_prompt_id = "vibedesk-swarm-reflector"

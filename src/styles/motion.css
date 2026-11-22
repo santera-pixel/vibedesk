@@ -1,0 +1,619 @@
+/* ------------------------------------------------------------------ *
+ * Motion and shape
+ *
+ * The whole vocabulary, in one file. Four durations, two curves, two
+ * generated springs, and only `opacity` and `transform` ever transition —
+ * both are compositor properties, so a transition costs a layer update and
+ * never a paint or a layout.
+ *
+ * A colour transition is a paint, and a paint on hover is the most common
+ * way an interface feels heavy. Hover states in this app are instant.
+ *
+ * See docs/PLAN-STATUS.md.
+ * ------------------------------------------------------------------ */
+
+:root {
+  /* The reveal curve: quick out of the gate, long settle. */
+  --vd-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  /* The landing curve: a slight overshoot, for something that arrives. */
+  --vd-ease-land: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* The four tiers. A duration is chosen by what moves, not by where it is
+     used, which is what makes the reduced-motion treatment possible: each
+     tier scales differently instead of all of them collapsing to nothing. */
+
+  /* Tier 1 — colour, opacity, border. Never scaled. They aid comprehension
+     and they do not move, so suppressing them removes information. */
+  --vd-dur-1: 90ms;
+  /* Tier 2 — small transforms: a press, a toggle, a hover lift. */
+  --vd-dur-2: 140ms;
+  /* Tier 3 — arrivals: a row, a panel, a menu. */
+  --vd-dur-3: 300ms;
+  /* Tier 4 — the whole-window reveal. */
+  --vd-dur-4: 520ms;
+
+  /* 1, 0.5 or 0. Written by the rules below from the Motion preference, read
+     by `motion.ts` so a tween and a transition use the same number. */
+  --vd-motion-scale: 1;
+
+  /* Tier 2 and 3, scaled. Tier 1 is deliberately not derived from these. */
+  --vd-fast: calc(var(--vd-dur-2) * var(--vd-motion-scale));
+  --vd-slow: calc(var(--vd-dur-3) * var(--vd-motion-scale));
+
+  /* The per-item step for a staggered list. */
+  --vd-stagger: 18ms;
+
+  /* Not an interaction duration: the one continuous rotation in the app, and
+     it only exists while a turn is running. */
+  --vd-dur-spin: 900ms;
+
+  /* Overwritten at boot by `installSprings()` with a sampled `linear()` curve.
+     The value here is the same curve flattened, so a stylesheet that loads
+     before the script still has a usable easing rather than an invalid one. */
+  --vd-spring-soft: cubic-bezier(0.22, 0.9, 0.3, 1);
+  --vd-spring-snappy: cubic-bezier(0.3, 1.2, 0.4, 1);
+}
+
+/* The three motion preferences, mutually exclusive by construction: each rule
+   excludes the other two, so specificity never decides the outcome.
+
+   `system` is the default and the only value that consults the OS. `full` and
+   `reduced` are explicit overrides: the OS setting is machine-wide, and a user
+   who turned animation effects off for battery reasons should not have to
+   change a system preference to get a theme reveal back.
+
+   The tiers, per the plan:
+
+     colour, opacity, border   keep, full duration
+     small transforms          keep, halved
+     large movement, loops     drop
+     view transitions          cross-fade only
+
+   Halving rather than zeroing is the point. The old rule collapsed every
+   duration to 1ms, which is not "reduced motion" — it is no motion, and it is
+   why the interface read as abrupt rather than as calm. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']):not([data-motion='reduced']) {
+    --vd-motion-scale: 0.5;
+  }
+}
+:root[data-motion='full'] {
+  --vd-motion-scale: 1;
+}
+:root[data-motion='reduced'] {
+  --vd-motion-scale: 0;
+}
+
+/* A loop is not a transition: there is no shorter version of "forever". Under
+   either reduced setting the spinner stops and the label carries the meaning. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .vd-spin {
+    animation: none;
+  }
+}
+:root[data-motion='reduced'] .vd-spin {
+  animation: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * The one entrance
+ * ------------------------------------------------------------------ */
+
+@keyframes vd-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* One shot. `backwards`, not `both`: the from-state has to apply from the
+   first frame, but a finished animation that keeps filling stays in
+   `getAnimations()` and keeps its layer alive for the rest of the session. The
+   end state of this animation is the element's own state, so there is nothing
+   to hold. */
+.vd-enter {
+  animation: vd-enter var(--vd-slow) var(--vd-spring-soft) backwards;
+}
+
+/* A replayed transcript mounts hundreds of rows in a few frames. Animating
+   each one costs more than it communicates, so the replay opts out. */
+.vd-replay .vd-enter {
+  animation: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * Stagger
+ *
+ * The delay is arithmetic in CSS, not a timer in JavaScript: `--vd-i` is the
+ * item's index, set by `stagger()` in `motion.ts`, and the step is scaled with
+ * everything else so a reduced-motion user gets no delay at all.
+ *
+ * Only for a list that mounts once. A stagger on a list that re-renders on a
+ * data tick is N animations per tick for no information.
+ * ------------------------------------------------------------------ */
+
+.vd-stagger > * {
+  animation-delay: calc(var(--vd-i, 0) * var(--vd-stagger) * var(--vd-motion-scale));
+}
+
+/* ------------------------------------------------------------------ *
+ * Reveal on scroll
+ *
+ * A scroll-driven timeline, so there is no listener, no re-render and no
+ * layout: the compositor advances the animation as the element enters the
+ * viewport. Guarded, because without a timeline the animation would run on the
+ * document clock and fade the element in on a timer instead.
+ * ------------------------------------------------------------------ */
+
+@keyframes vd-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@supports (animation-timeline: view()) {
+  .vd-reveal {
+    animation: vd-reveal linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 55%;
+  }
+}
+
+/* A scroll-driven animation has no duration to scale, so the reduced setting
+   has to remove it rather than shorten it. */
+:root[data-motion='reduced'] .vd-reveal {
+  animation: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * Expand and collapse
+ *
+ * The row goes 0fr → 1fr and the child clips. No height read, no measuring,
+ * no JS, and the change is bounded to the subtree. The child stays mounted,
+ * which is what makes the animation possible at all — every consumer here is
+ * a disclosure whose content is already in memory.
+ * ------------------------------------------------------------------ */
+
+.vd-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--vd-fast) var(--vd-ease);
+}
+.vd-expand[data-open='true'] {
+  grid-template-rows: 1fr;
+}
+.vd-expand > * {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity var(--vd-dur-1) var(--vd-ease);
+}
+.vd-expand[data-open='true'] > * {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Scroll edges
+ *
+ * A scroll-driven timeline drives two custom properties that feed a mask.
+ * No scroll listener, no re-render, no layout — the compositor does it, and
+ * the fade is a function of scroll offset rather than of a state variable
+ * that lags behind it.
+ * ------------------------------------------------------------------ */
+
+@property --vd-fade-top {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+@property --vd-fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes vd-fade-top {
+  from {
+    --vd-fade-top: 0px;
+  }
+  to {
+    --vd-fade-top: 28px;
+  }
+}
+@keyframes vd-fade-bottom {
+  from {
+    --vd-fade-bottom: 28px;
+  }
+  to {
+    --vd-fade-bottom: 0px;
+  }
+}
+
+/* Guarded: without a scroll timeline the animation would run on the document
+   timeline and pulse the fade on a timer, which is worse than no fade. */
+@supports (animation-timeline: scroll()) {
+  .vd-scroll-fade {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--vd-fade-top),
+      #000 calc(100% - var(--vd-fade-bottom)),
+      transparent 100%
+    );
+    animation:
+      vd-fade-top linear both,
+      vd-fade-bottom linear both;
+    animation-timeline: scroll(self block), scroll(self block);
+    animation-range:
+      0 28px,
+      calc(100% - 28px) 100%;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * View transitions
+ *
+ * Two kinds, both bounded to one element. A whole-window snapshot on every
+ * panel open is a full-surface capture for a change that touches one column,
+ * and the theme reveal already owns the one whole-window transition the app
+ * can afford.
+ *
+ * The name is applied through `data-vt` for the duration of the transition
+ * only. A static `view-transition-name` would also capture these elements
+ * during the theme reveal, which would punch a hole in its mask.
+ * ------------------------------------------------------------------ */
+
+:root[data-vt='panel'] .vd-panel-surface {
+  view-transition-name: vd-panel;
+}
+:root[data-vt='chat'] .vd-transcript {
+  view-transition-name: vd-transcript;
+}
+
+/* The root snapshots are neutralised while a bounded transition runs. Without
+   this the theme reveal's rules would apply — the incoming root is masked to
+   nothing and the outgoing one is opaque — and the window would freeze on a
+   stale picture for the length of the transition.
+
+   Done with inherited custom properties rather than a compound selector on the
+   pseudo-element: a pseudo-element inherits from its originating element, so
+   `:root[data-vt]` reaches `::view-transition-old(root)` reliably, whereas
+   `:root[data-vt]::view-transition-old(root)` depends on how the engine
+   resolves a pseudo-element of a pseudo-element's originating element. */
+:root[data-vt] {
+  --vd-vt-root-old: 0;
+  --vd-vt-root-mask: none;
+}
+
+@keyframes vd-vt-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes vd-vt-in {
+  from {
+    opacity: 0;
+  }
+}
+
+::view-transition-old(vd-panel),
+::view-transition-new(vd-panel),
+::view-transition-old(vd-transcript),
+::view-transition-new(vd-transcript) {
+  animation-duration: var(--vd-dur-1);
+  animation-timing-function: var(--vd-ease);
+}
+::view-transition-old(vd-panel),
+::view-transition-old(vd-transcript) {
+  animation-name: vd-vt-out;
+}
+::view-transition-new(vd-panel),
+::view-transition-new(vd-transcript) {
+  animation-name: vd-vt-in;
+}
+
+/* ------------------------------------------------------------------ *
+ * The one whole-window effect
+ *
+ * A theme change is the only change that touches the whole window, so it is
+ * the only place a view transition earns a window snapshot. Both
+ * pseudo-elements are frozen here and a single WAAPI animation grows a
+ * circular mask on the incoming snapshot, spreading from the pointer. One
+ * animation, one layer, no per-frame JavaScript. See src/lib/reveal.ts.
+ *
+ * The mask is sized to nothing here, not left at `auto`. `auto` on a
+ * `closest-side` gradient is a circle inscribed in the box, so every frame
+ * where the animation is not applying — before `ready` resolves, after it
+ * finishes, or if it is cancelled — would paint a circle in the middle of the
+ * window. At zero size the same frames paint nothing, and the animation is the
+ * only thing that ever makes the new snapshot visible.
+ * ------------------------------------------------------------------ */
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) {
+  z-index: 1;
+  opacity: var(--vd-vt-root-old, 1);
+}
+::view-transition-new(root) {
+  z-index: 2;
+  mask-image: var(
+    --vd-vt-root-mask,
+    radial-gradient(circle closest-side, #000 99%, transparent 100%)
+  );
+  mask-repeat: no-repeat;
+  mask-size: 0px 0px;
+  mask-position: 0 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * The one loop
+ * ------------------------------------------------------------------ */
+
+@keyframes vd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.vd-spin {
+  animation: vd-spin var(--vd-dur-spin) linear infinite;
+}
+
+/* ------------------------------------------------------------------ *
+ * Shape
+ *
+ * Six primitives, every one native, none of them a dependency. Each has a
+ * fallback that is the shape without the effect, so a browser that has not
+ * shipped the property still draws something deliberate.
+ * ------------------------------------------------------------------ */
+
+/* 1. Squircle. A static shape, not motion: it costs nothing at runtime and it
+   is the one place the surfaces read as drawn rather than boxed. Guarded
+   because `corner-shape` is recent; the `border-radius` underneath is the
+   fallback and is already on every one of these. */
+@supports (corner-shape: squircle) {
+  .vd-card,
+  .vd-panel,
+  .vd-composer-shell,
+  .vd-shell > nav > button {
+    corner-shape: squircle;
+  }
+}
+
+/* 2. Blob. An eight-value `border-radius` — four horizontal radii and four
+   vertical — which is animatable and needs no SVG. Used for the one organic
+   surface in the app; a blob on a control would read as a mistake. */
+.vd-blob {
+  border-radius: 42% 58% 63% 37% / 47% 41% 59% 53%;
+}
+
+/* 3. Mesh gradient. Three layered radial gradients in `oklch`, so the
+   interpolation between them is perceptually even rather than muddy in the
+   middle. The fallback is the flat surface underneath. */
+.vd-mesh {
+  background-image:
+    radial-gradient(
+      62% 72% at 16% 20%,
+      color-mix(in oklab, var(--vd-accent) 20%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      56% 66% at 84% 16%,
+      color-mix(in oklab, var(--vd-warn) 15%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      72% 82% at 60% 90%,
+      color-mix(in oklab, var(--vd-ok) 13%, transparent),
+      transparent 74%
+    );
+}
+
+/* 4. Grain. `feTurbulence` in a data URI, blended over whatever is behind it.
+   The opacity is a token per theme, because the same noise reads as texture on
+   a dark canvas and as dirt on a light one. */
+.vd-grain::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: var(--vd-grain);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+}
+
+/* 5. Gooey. A blur plus a steep alpha ramp, which fuses shapes that overlap
+   into one mass. It is a filter, so it costs a pass — which is why it is only
+   ever on an element that exists while something is happening, never on the
+   chrome. The fallback is the plain blur the filter starts from. */
+.vd-gooey {
+  filter: url(#vd-gooey);
+}
+@supports not (filter: url(#vd-gooey)) {
+  .vd-gooey {
+    filter: blur(0.5px);
+  }
+}
+
+/* The dots the filter fuses. A loop, so it drops under either reduced setting
+   — the label beside it carries the meaning on its own. */
+@keyframes vd-gooey-dot {
+  0%,
+  100% {
+    transform: scale(0.72);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.vd-gooey-dot {
+  animation: vd-gooey-dot 1.1s var(--vd-ease) infinite;
+  animation-delay: calc(var(--vd-i, 0) * 140ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .vd-gooey-dot {
+    animation: none;
+    opacity: 0.8;
+  }
+}
+:root[data-motion='reduced'] .vd-gooey-dot {
+  animation: none;
+  opacity: 0.8;
+}
+
+/* 6. Gloss. A translucent fill plus a 1 px specular inset — the read of glass
+   without a `backdrop-filter`, which is the one real per-pixel GPU cost in the
+   app and is not worth it. Defined in `globals.css` beside the palette it
+   draws from; listed here so the vocabulary is in one place. */
+
+/* 7. Aura. A light travelling around the edge of a skill that this chat
+   actually loaded.
+
+   The ring is a conic gradient on a 1px-padded pseudo-element, masked down to
+   the border so the card's own fill is untouched — no extra element, no
+   layout, and it composites on the GPU because the only animated property is
+   an angle. `@property` is what makes that angle interpolable: without it the
+   gradient would step round in 360 jumps instead of sweeping.
+
+   It is a loop, so it obeys the same rule as the other loops here: reduced
+   motion stops it and leaves a static ring, which still says "used" without
+   moving. */
+@property --vd-aura {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.vd-aura {
+  position: relative;
+  isolation: isolate;
+}
+
+.vd-aura::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: 1;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--vd-aura),
+    transparent 0deg,
+    color-mix(in oklab, var(--vd-accent) 70%, transparent) 24deg,
+    var(--vd-accent) 46deg,
+    color-mix(in oklab, var(--vd-accent) 70%, transparent) 68deg,
+    transparent 110deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: vd-aura-sweep 2.8s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes vd-aura-sweep {
+  to {
+    --vd-aura: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .vd-aura::before {
+    animation: none;
+    background: conic-gradient(
+      from 0deg,
+      var(--vd-accent) 0deg,
+      transparent 90deg,
+      transparent 360deg
+    );
+  }
+}
+:root[data-motion='reduced'] .vd-aura::before {
+  animation: none;
+  background: conic-gradient(
+    from 0deg,
+    var(--vd-accent) 0deg,
+    transparent 90deg,
+    transparent 360deg
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * The swarm graph
+ *
+ * Two primitives, both about a run that is moving. The edge dash is the only
+ * way the graph says "work is flowing along this dependency" without a label,
+ * and the pulse is the lead's heartbeat while it is the only member alive.
+ *
+ * Both are loops, so both obey the rule every loop here obeys: reduced motion
+ * stops them and leaves a static mark that still reads as "live" — a solid
+ * edge, a solid dot — rather than removing the information with the movement.
+ * ------------------------------------------------------------------ */
+
+@keyframes vd-swarm-flow {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+.vd-swarm-edge-live {
+  stroke-dasharray: 4 8;
+  animation: vd-swarm-flow 700ms linear infinite;
+}
+
+@keyframes vd-swarm-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.4);
+  }
+}
+
+.vd-swarm-pulse {
+  animation: vd-swarm-pulse 1.6s var(--vd-ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .vd-swarm-edge-live {
+    animation: none;
+    stroke-dasharray: none;
+  }
+  :root:not([data-motion='full']) .vd-swarm-pulse {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+:root[data-motion='reduced'] .vd-swarm-edge-live {
+  animation: none;
+  stroke-dasharray: none;
+}
+:root[data-motion='reduced'] .vd-swarm-pulse {
+  animation: none;
+  opacity: 0.7;
+}

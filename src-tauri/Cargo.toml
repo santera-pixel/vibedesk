@@ -1,0 +1,100 @@
+[package]
+name = "vibedesk"
+version = "0.1.0"
+description = "VibeDesk — a desktop cockpit for the Mistral Vibe agent runtime"
+authors = ["VibeDesk"]
+edition = "2021"
+rust-version = "1.77"
+# Two binaries: the app and the headless swarm runner. Without this, `tauri
+# build` cannot tell which one the bundle is for.
+default-run = "vibedesk"
+
+[lib]
+name = "vibedesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "process",
+  "io-util",
+  "sync",
+  "time",
+  "fs",
+  "macros",
+  "rt-multi-thread",
+  "net",
+] }
+thiserror = "2"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+semver = "1"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "stream",
+] }
+
+# The capability layer. `regex` compiles the tokenjuice rule patterns, which
+# ship as data; `hyper` is the loopback server the compaction proxy listens on.
+# All four are already in the lock file as transitive dependencies of tauri, so
+# naming them here adds no download.
+regex = "1"
+# The `window` channel's capture. Already in the lock file as a transitive
+# dependency of tauri, so naming it here adds no download.
+png = "0.18"
+# The provisioning step for `codebase-memory-mcp`. Windows publishes only a
+# `.zip`, so the step needs a zip reader; deflate is the only method the release
+# uses, and the other features would pull in bzip2 and zstd for nothing.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+# The channeler drives a WebView2 through `ICoreWebView2::CallDevToolsProtocolMethod`,
+# which is Microsoft's documented Win32 API for it — a runtime API, not a debug
+# feature, so it works in a release build with no port and no listener. Both
+# crates are already in the lock file as transitive dependencies of tauri, so
+# naming them here adds no download.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_Memory",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_Threading",
+  "Win32_Storage_Xps",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+# `test-util` gives the turn watchdog a fake clock, so the idle timeout can be
+# exercised in milliseconds instead of three real minutes.
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

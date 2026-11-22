@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "vibe-mastery",
+  "version": "1.0.0",
+  "description": "Skill bundles on demand: discover skills from any clone, load one into the turn, count real use, and see how far each source is behind upstream.",
+  "author": {
+    "name": "Santera"
+  },
+  "homepage": "https://github.com/santera-pixel/dsh-mastery",
+  "repository": "https://github.com/santera-pixel/dsh-mastery",
+  "license": "MIT",
+  "keywords": ["skills", "bundles", "assay", "git", "mcp"],
+  "extensions": {
+    "ai.mistral.vibe": {
+      "schemaVersion": 1,
+      "displayName": "Vibe Mastery",
+      "toolNamespace": "mastery"
+    }
+  }
+}

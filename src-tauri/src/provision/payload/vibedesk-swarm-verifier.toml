@@ -1,0 +1,4 @@
+display_name = "VibeDesk Swarm Verifier"
+description = "Tries to break a task's work and reports a verdict with evidence."
+safety = "safe"
+system_prompt_id = "vibedesk-swarm-verifier"

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-11-21-plan-polish",
+  "currentTodo": "t8-t10 done; t11 (end-to-end games) NOT started - needs live model runs (CPU-heavy), awaiting user go-ahead",
+  "completedTodos": [
+    "t1 stop_process deadlock; t2 retire_verifier; t3 AmendError::NoOp; t4 scratch briefs; t5 one-wide send-back; t6 destructive() quote-aware; t7 denial message; t8 live process count in panel + live_count; t9 checkout retention (reap, keep 10); t10 game.sh builds first"
+  ],
+  "activeSlice": "Tasks 1-10 of docs/PLAN-polish.md complete and verified",
+  "evidenceRefs": [
+    "cargo test --lib -- --test-threads=4 swarm:: acp:: => 649 passed 0 failed; node --test tests/*.test.ts => 291 pass 0 fail; npx tsc --noEmit clean; npm run build clean; cargo build --bin swarm-run clean; bash -n game.sh ok; each fix test proven RED before fix"
+  ],
+  "blockedOn": "t11 blocked on user approval (CPU constraint): live swarm runs peg the machine",
+  "nextStep": "Task 11: re-run cpp-terrain-flyer from base cd1e776 + 4 games via game.sh - NOT started on user's no-lag constraint; needs explicit go-ahead (3 live agent processes, up to 3600s each)",
+  "updatedAt": "2026-11-21"
+}

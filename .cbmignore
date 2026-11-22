@@ -1,0 +1,13 @@
+# Keep the codebase-memory graph to the VibeDesk harness itself.
+# .repos/ holds vendored clones of other projects (Aegis, donsetch,
+# codebase-memory-mcp, ...) that are indexed as their own projects.
+.repos/
+
+# Dependencies and build output.
+node_modules/
+dist/
+src-tauri/target/
+__pycache__/
+
+# Local index artifacts.
+.codebase-memory/

@@ -1,0 +1,4 @@
+display_name = "VibeDesk Swarm Lead"
+description = "Plans, integrates and audits a swarm run. Does not implement."
+safety = "neutral"
+system_prompt_id = "vibedesk-swarm-lead"
