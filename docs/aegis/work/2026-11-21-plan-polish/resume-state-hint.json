@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-11-21-plan-polish",
+  "lastCheckpointRef": "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json",
+  "resumeInstruction": "main will be rewritten to drop the sidecar-experiment commits; tag v0.1.0 still points at 9121c4c which remains reachable. README now credits Aegis (GanyuanRan/Aegis), mastery bundles (Anti-Slop by miqdadbadjuber, UI/UX by nextlevelbuilder, 3Dviz by viettranx, assay by santera-pixel as own creation), and channeler (in-repo .vibe/skills/channeler*, santera-pixel).",
+  "knownPartialWork": [],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-11-21-plan-polish/10-intent.md",
+    "docs/aegis/work/2026-11-21-plan-polish/20-checkpoint.md",
+    "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": []
+}

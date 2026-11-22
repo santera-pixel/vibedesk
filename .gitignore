@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output. `tauri.conf.json` runs `npm run build` before every build and
+# reads `../dist`, so both are regenerated and neither belongs in the repository.
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Python bytecode left by one-off scripts
+__pycache__/
+*.pyc
+
+# Local index artifacts
+.codebase-memory/
+
+# Vendored clones of other projects, indexed as their own projects
+.repos/
+
+# Working directories: one-off patch scripts and probe screenshots
+.scratch/
+.shots/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp

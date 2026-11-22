@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "All 11 tasks of docs/PLAN-polish.md executed and verified; cpp-terrain-flyer reaches done from base cd1e776 with seven merged branches and a green suite",
+  "goal": "All 11 tasks of docs/PLAN-polish.md executed and verified; cpp-terrain-flyer reaches done from base cd1e776 with seven merged branches and a green suite",
+  "successEvidence": [],
+  "stopCondition": "Stop when success evidence is satisfied or a blocker/risk requires pause.",
+  "nonGoals": [],
+  "scope": "src-tauri swarm/acp code named in the plan (bridge.rs, engine.rs, amend.rs, roles.rs, permissions.rs, schedule.rs, game.sh); no permission-policy loosening, no scheduler rewrite",
+  "changeKinds": [
+    "code"
+  ],
+  "riskHints": []
+}

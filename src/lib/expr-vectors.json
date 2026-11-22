@@ -1,0 +1,695 @@
+[
+  {
+    "name": "a literal number is itself",
+    "expr": 42,
+    "data": {},
+    "expect": 42
+  },
+  {
+    "name": "a literal string is itself",
+    "expr": "ok",
+    "data": {},
+    "expect": "ok"
+  },
+  {
+    "name": "a literal boolean is itself",
+    "expr": true,
+    "data": {},
+    "expect": true
+  },
+  {
+    "name": "a path reads a nested value",
+    "expr": {
+      "@path": "/ci/queue/depth"
+    },
+    "data": {
+      "ci": {
+        "queue": {
+          "depth": 3
+        }
+      }
+    },
+    "expect": 3
+  },
+  {
+    "name": "a path reads a top-level value",
+    "expr": {
+      "@path": "/ci"
+    },
+    "data": {
+      "ci": 7
+    },
+    "expect": 7
+  },
+  {
+    "name": "a path reads an array element",
+    "expr": {
+      "@path": "/ci/runs/1"
+    },
+    "data": {
+      "ci": {
+        "runs": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    "expect": "b"
+  },
+  {
+    "name": "a path that does not exist is missing",
+    "expr": {
+      "@path": "/ci/nope"
+    },
+    "data": {
+      "ci": {}
+    },
+    "expect": "__missing__"
+  },
+  {
+    "name": "a path through a scalar is missing",
+    "expr": {
+      "@path": "/ci/a/b"
+    },
+    "data": {
+      "ci": {
+        "a": 1
+      }
+    },
+    "expect": "__missing__"
+  },
+  {
+    "name": "a path with no source is missing",
+    "expr": {
+      "@path": "/nope/a"
+    },
+    "data": {},
+    "expect": "__missing__"
+  },
+  {
+    "name": "exists is true for a present path",
+    "expr": {
+      "@exists": "/ci/queue"
+    },
+    "data": {
+      "ci": {
+        "queue": 1
+      }
+    },
+    "expect": true
+  },
+  {
+    "name": "exists is false for an absent path",
+    "expr": {
+      "@exists": "/ci/nope"
+    },
+    "data": {
+      "ci": {}
+    },
+    "expect": false
+  },
+  {
+    "name": "missing is true for an absent path",
+    "expr": {
+      "@missing": "/ci/nope"
+    },
+    "data": {
+      "ci": {}
+    },
+    "expect": true
+  },
+  {
+    "name": "missing is false for a present path",
+    "expr": {
+      "@missing": "/ci/queue"
+    },
+    "data": {
+      "ci": {
+        "queue": 1
+      }
+    },
+    "expect": false
+  },
+  {
+    "name": "eq compares numbers",
+    "expr": {
+      "@eq": [
+        {
+          "@path": "/n"
+        },
+        3
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "eq is false for different numbers",
+    "expr": {
+      "@eq": [
+        {
+          "@path": "/n"
+        },
+        4
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": false
+  },
+  {
+    "name": "ne compares strings",
+    "expr": {
+      "@ne": [
+        {
+          "@path": "/s"
+        },
+        "ok"
+      ]
+    },
+    "data": {
+      "s": "bad"
+    },
+    "expect": true
+  },
+  {
+    "name": "gt compares numbers",
+    "expr": {
+      "@gt": [
+        {
+          "@path": "/n"
+        },
+        2
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "gt is false when equal",
+    "expr": {
+      "@gt": [
+        {
+          "@path": "/n"
+        },
+        3
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": false
+  },
+  {
+    "name": "gte is true when equal",
+    "expr": {
+      "@gte": [
+        {
+          "@path": "/n"
+        },
+        3
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "lt compares numbers",
+    "expr": {
+      "@lt": [
+        {
+          "@path": "/n"
+        },
+        4
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "lte is true when equal",
+    "expr": {
+      "@lte": [
+        {
+          "@path": "/n"
+        },
+        3
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "gt compares strings lexicographically",
+    "expr": {
+      "@gt": [
+        {
+          "@path": "/s"
+        },
+        "abc"
+      ]
+    },
+    "data": {
+      "s": "abd"
+    },
+    "expect": true
+  },
+  {
+    "name": "and is true when both hold",
+    "expr": {
+      "@and": [
+        {
+          "@gt": [
+            {
+              "@path": "/n"
+            },
+            1
+          ]
+        },
+        {
+          "@lt": [
+            {
+              "@path": "/n"
+            },
+            5
+          ]
+        }
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "and is false when one fails",
+    "expr": {
+      "@and": [
+        {
+          "@gt": [
+            {
+              "@path": "/n"
+            },
+            1
+          ]
+        },
+        {
+          "@lt": [
+            {
+              "@path": "/n"
+            },
+            2
+          ]
+        }
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": false
+  },
+  {
+    "name": "or is true when one holds",
+    "expr": {
+      "@or": [
+        {
+          "@gt": [
+            {
+              "@path": "/n"
+            },
+            10
+          ]
+        },
+        {
+          "@lt": [
+            {
+              "@path": "/n"
+            },
+            5
+          ]
+        }
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": true
+  },
+  {
+    "name": "or is false when none hold",
+    "expr": {
+      "@or": [
+        {
+          "@gt": [
+            {
+              "@path": "/n"
+            },
+            10
+          ]
+        },
+        {
+          "@lt": [
+            {
+              "@path": "/n"
+            },
+            1
+          ]
+        }
+      ]
+    },
+    "data": {
+      "n": 3
+    },
+    "expect": false
+  },
+  {
+    "name": "not inverts",
+    "expr": {
+      "@not": {
+        "@exists": "/nope"
+      }
+    },
+    "data": {},
+    "expect": true
+  },
+  {
+    "name": "a missing path is not true",
+    "expr": {
+      "@not": {
+        "@path": "/nope"
+      }
+    },
+    "data": {},
+    "expect": true
+  },
+  {
+    "name": "add sums",
+    "expr": {
+      "@add": [
+        {
+          "@path": "/a"
+        },
+        {
+          "@path": "/b"
+        }
+      ]
+    },
+    "data": {
+      "a": 2,
+      "b": 3
+    },
+    "expect": 5
+  },
+  {
+    "name": "sub subtracts",
+    "expr": {
+      "@sub": [
+        {
+          "@path": "/a"
+        },
+        1
+      ]
+    },
+    "data": {
+      "a": 5
+    },
+    "expect": 4
+  },
+  {
+    "name": "mul multiplies",
+    "expr": {
+      "@mul": [
+        {
+          "@path": "/a"
+        },
+        3
+      ]
+    },
+    "data": {
+      "a": 4
+    },
+    "expect": 12
+  },
+  {
+    "name": "div divides",
+    "expr": {
+      "@div": [
+        {
+          "@path": "/a"
+        },
+        4
+      ]
+    },
+    "data": {
+      "a": 10
+    },
+    "expect": 2.5
+  },
+  {
+    "name": "div by zero is missing",
+    "expr": {
+      "@div": [
+        {
+          "@path": "/a"
+        },
+        0
+      ]
+    },
+    "data": {
+      "a": 10
+    },
+    "expect": "__missing__"
+  },
+  {
+    "name": "arithmetic over a missing path is missing",
+    "expr": {
+      "@add": [
+        {
+          "@path": "/nope"
+        },
+        1
+      ]
+    },
+    "data": {},
+    "expect": "__missing__"
+  },
+  {
+    "name": "format number groups thousands",
+    "expr": {
+      "@format": "number",
+      "@of": 1234.5
+    },
+    "data": {},
+    "expect": "1,234.5"
+  },
+  {
+    "name": "format percent reads a fraction",
+    "expr": {
+      "@format": "percent",
+      "@of": 0.42
+    },
+    "data": {},
+    "expect": "42%"
+  },
+  {
+    "name": "format duration reads seconds",
+    "expr": {
+      "@format": "duration",
+      "@of": 90
+    },
+    "data": {},
+    "expect": "1m 30s"
+  },
+  {
+    "name": "format duration reads hours",
+    "expr": {
+      "@format": "duration",
+      "@of": 3720
+    },
+    "data": {},
+    "expect": "1h 2m"
+  },
+  {
+    "name": "format truncate shortens a long string",
+    "expr": {
+      "@format": "truncate",
+      "@of": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+    },
+    "data": {},
+    "expect": "abcdefghijklmnopqrstuvwxyzabcdefghijklm…"
+  },
+  {
+    "name": "format over a missing path is a dash",
+    "expr": {
+      "@format": "number",
+      "@of": {
+        "@path": "/nope"
+      }
+    },
+    "data": {},
+    "expect": "—"
+  },
+  {
+    "name": "a when-style condition over live data",
+    "expr": {
+      "@and": [
+        {
+          "@gt": [
+            {
+              "@path": "/ci/queue/depth"
+            },
+            10
+          ]
+        },
+        {
+          "@ne": [
+            {
+              "@path": "/ci/summary/state"
+            },
+            "ok"
+          ]
+        }
+      ]
+    },
+    "data": {
+      "ci": {
+        "queue": {
+          "depth": 12
+        },
+        "summary": {
+          "state": "degraded"
+        }
+      }
+    },
+    "expect": true
+  },
+  {
+    "name": "the same condition is false when the queue drains",
+    "expr": {
+      "@and": [
+        {
+          "@gt": [
+            {
+              "@path": "/ci/queue/depth"
+            },
+            10
+          ]
+        },
+        {
+          "@ne": [
+            {
+              "@path": "/ci/summary/state"
+            },
+            "ok"
+          ]
+        }
+      ]
+    },
+    "data": {
+      "ci": {
+        "queue": {
+          "depth": 2
+        },
+        "summary": {
+          "state": "degraded"
+        }
+      }
+    },
+    "expect": false
+  },
+
+  {
+    "name": "@if takes the then branch when the condition holds",
+    "expr": {
+      "@if": [
+        {
+          "@gt": [
+            {
+              "@path": "/ci/errors"
+            },
+            0
+          ]
+        },
+        "danger",
+        "ok"
+      ]
+    },
+    "data": {
+      "ci": {
+        "errors": 3
+      }
+    },
+    "expect": "danger"
+  },
+  {
+    "name": "@if takes the else branch when the condition does not hold",
+    "expr": {
+      "@if": [
+        {
+          "@gt": [
+            {
+              "@path": "/ci/errors"
+            },
+            0
+          ]
+        },
+        "danger",
+        "ok"
+      ]
+    },
+    "data": {
+      "ci": {
+        "errors": 0
+      }
+    },
+    "expect": "ok"
+  },
+  {
+    "name": "@if treats a missing condition as false",
+    "expr": {
+      "@if": [
+        {
+          "@path": "/ci/errors"
+        },
+        "danger",
+        "ok"
+      ]
+    },
+    "data": {},
+    "expect": "ok"
+  },
+  {
+    "name": "@if nests inside @format",
+    "expr": {
+      "@format": "number",
+      "@of": {
+        "@if": [
+          {
+            "@exists": "/ci/spend"
+          },
+          {
+            "@path": "/ci/spend"
+          },
+          0
+        ]
+      }
+    },
+    "data": {
+      "ci": {
+        "spend": 12
+      }
+    },
+    "expect": "12"
+  }
+]

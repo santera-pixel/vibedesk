@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-11-21-plan-polish",
+  "currentTodo": "credits added; history cleanup pending",
+  "completedTodos": [],
+  "activeSlice": "credits + commit cleanup",
+  "evidenceRefs": [],
+  "blockedOn": null,
+  "nextStep": "squash 7fac4af/eef6062/8f669b5 into one commit on top of c3bd1b3, force-push main with lease",
+  "updatedAt": "2026-11-22"
+}

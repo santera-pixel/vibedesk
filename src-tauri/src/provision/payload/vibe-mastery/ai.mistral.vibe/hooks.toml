@@ -1,0 +1,13 @@
+# The catalog pointer.
+#
+# A chip row is a GUI affordance and Vibe has no GUI plugin surface, so the
+# equivalent is a line of context at session start: it names the bundles that
+# are on, and says which tool lists and loads them. Without it the model has to
+# notice four MCP tools in a list of forty and guess what they are for.
+#
+# It runs on every source, including resume, because the per-session switches
+# live in ${PLUGIN_DATA} and a resumed session should be told what it left on.
+[[hooks]]
+name = "mastery-catalog"
+type = "session_start"
+command = "node hooks/session-start.js"

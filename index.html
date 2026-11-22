@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="ink">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      This meta is the policy that actually applies. `tauri.conf.json` declares
+      the same string, but a meta tag in the document wins, so the two must be
+      kept identical — they had drifted once already, and the meta was the weaker
+      of the two.
+
+      `frame-src data:` is what lets a sandbox block render: its document is
+      loaded from a `data:` URL, which is the only local scheme that does not
+      inherit this policy wholesale. `http://widget.localhost` is what lets a
+      `widget` block render: it is a different origin, so its document carries
+      its own policy and can run scripts without this one being loosened. Note
+      that `script-src` here is still `'self'` — a widget does not need the app
+      to allow inline scripts, and it must never be given that.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src data: http://widget.localhost widget://localhost; form-action 'none'"
+    />
+    <!--
+      Without a declared icon the webview requests /favicon.ico, which does not
+      exist, and logs a 404 on every boot. An inline SVG answers that request
+      with no file and no round trip; `img-src data:` in the policy above
+      already permits it.
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Cpath d='M9 10l7 13 7-13' fill='none' stroke='%23e8e8e8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <title>VibeDesk</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
