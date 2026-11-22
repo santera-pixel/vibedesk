@@ -2217,6 +2217,38 @@ mod tests {
         assert_eq!(run.budget.unpriced_models, vec!["some-local-gguf".to_string()]);
     }
 
+    /// A run on priced models reports money, priced per member: the rehearsal's
+    /// lead and workers ran on `deepseek` while its verifiers ran on
+    /// `mistral-large`, and one rate for the run would be a guess about which.
+    #[test]
+    fn a_run_on_priced_models_reports_money_rather_than_unknown() {
+        let mut run = Run::new("g", "D:/ws", Member::new("lead", Role::Lead, "deepseek"));
+        let mut worker = Member::new("w-t1", Role::Worker, "deepseek");
+        worker.tokens_in = 1_000_000;
+        worker.cached_tokens = 900_000;
+        worker.tokens_out = 10_000;
+        let mut verifier = Member::new("v-t1", Role::Verifier, "mistral-large-4-0-3");
+        verifier.tokens_in = 1_000_000;
+        verifier.cached_tokens = 900_000;
+        verifier.tokens_out = 10_000;
+        run.members = vec![worker, verifier];
+        run.budget.max_spend_micros = Some(1_500_000);
+        run.recompute_spend();
+
+        // worker on deepseek: 100k fresh at $0.30/M + 900k cached at $0.007/M
+        // + 10k out at $1.20/M = 30,000 + 6,300 + 12,000
+        // verifier on mistral-large: 200,000 + 180,000 + 60,000
+        assert_eq!(
+            run.budget.spend_micros,
+            Some(48_300 + 440_000),
+            "unpriced: {:?}",
+            run.budget.unpriced_models
+        );
+        assert!(run.budget.unpriced_models.is_empty());
+        let pct = run.budget.spend_pct.expect("a priced run has a money percentage");
+        assert!((pct - 488_300.0 / 1_500_000.0 * 100.0).abs() < 1e-9, "{pct}");
+    }
+
     #[test]
     fn a_run_that_has_stopped_reports_a_frozen_elapsed_time() {
         let mut run = Run::new("goal", "D:/ws", lead());

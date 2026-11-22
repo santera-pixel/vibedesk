@@ -319,6 +319,8 @@ async fn main() {
         if std::time::Instant::now() > deadline {
             eprintln!("\ntimed out after {timeout_secs}s");
             let _ = engine.stop(&sink);
+            // A cancelled run keeps its worktrees on purpose, but not its agents.
+            engine::end_of_run().await;
             break;
         }
         let Some(current) = engine.run() else { break };
@@ -341,6 +343,17 @@ async fn main() {
                     })
                     .unwrap_or_else(|| "no verdict".into());
                 println!("  {} {:?} · {verdict}", task.id, task.state);
+            }
+            // Release here rather than waiting for the engine's next tick: this
+            // process returns from `main`, which drops the runtime and cancels the
+            // drive loop. That race lost once, leaving four members running with
+            // nothing left to stop them.
+            let released = engine::end_of_run().await;
+            if released > 0 {
+                println!(
+                    "\nreleased {released} agent process{}",
+                    if released == 1 { "" } else { "es" }
+                );
             }
             if let Some(reflection) = &current.reflection {
                 println!("\nreflection · {}", reflection.summary);

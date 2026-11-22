@@ -351,6 +351,9 @@ struct Inner {
     /// Members whose agent process this engine stopped itself. A turn awaiting a
     /// bridge the engine took away sees the same close a dropped provider gives.
     stopped: BTreeSet<String>,
+    /// The run whose end-of-run release has already happened. The drive loop and
+    /// the headless runner both ask for it, and the second ask must do nothing.
+    ended: Option<String>,
 }
 
 impl Inner {
@@ -387,6 +390,7 @@ impl Default for Engine {
                 driver_lock: None,
                 board_bytes: 0,
                 stopped: BTreeSet::new(),
+                ended: None,
             }),
         }
     }
@@ -1381,20 +1385,6 @@ impl Engine {
                 // cleaning a project between runs failed with "Permission denied"
                 // until the app was restarted. The end-to-end harness found it:
                 // the test body finished and the process would not exit.
-                let released = release_bridges().await;
-                if released > 0 {
-                    engine.post(
-                        BoardEntry::new(
-                            "engine",
-                            BoardKind::Note,
-                            format!(
-                                "run stopped — released {released} agent process{}",
-                                if released == 1 { "" } else { "es" }
-                            ),
-                        )
-                        .about("run"),
-                    );
-                }
                 if cancelled > 0 {
                     engine.post(
                         BoardEntry::new(
@@ -1408,9 +1398,11 @@ impl Engine {
                         .about("run"),
                     );
                 }
-                // Now, and not before: the checkouts are held open by the
-                // processes that were just stopped.
-                release_checkouts();
+                // Releasing the agents and removing the checkouts is
+                // `end_of_run`'s job, and it happens once per run: this wrapper
+                // and the drive loop's terminal branch both end up here, and each
+                // doing its own release posted the reap note twice for one run.
+                end_of_run().await;
             }
             let mut inner = engine.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.driving = false;
@@ -4342,24 +4334,7 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
             return;
         }
         if run.state.is_terminal() {
-            // The run is over, so its agents are over. Releasing here is what
-            // lets a headless run's process exit: the members are children of
-            // this process, and a parked one keeps the runtime alive.
-            let released = release_bridges().await;
-            if released > 0 {
-                engine.post(
-                    BoardEntry::new(
-                        "engine",
-                        BoardKind::Note,
-                        format!(
-                            "run finished — released {released} agent process{}",
-                            if released == 1 { "" } else { "es" }
-                        ),
-                    )
-                    .about("run"),
-                );
-            }
-            release_checkouts();
+            end_of_run().await;
             return;
         }
 
@@ -6857,6 +6832,42 @@ fn write_run(run: &Run) {
 /// run terminal. The second is the one that matters for a headless run — the
 /// process could not exit while its members were still alive, and the buffered
 /// final report was never flushed.
+/// Release every process and checkout a finished run no longer needs.
+///
+/// Two callers, one owner: the drive loop when it finds the run terminal, and the
+/// headless runner, whose own poll loop returns from `main` and drops the runtime
+/// — which cancels the drive loop before its next tick can release. That race lost
+/// once: the run reported `done` with four members still running and no process
+/// left to stop them. Releasing twice is safe; the second call releases nothing.
+pub async fn end_of_run() -> usize {
+    {
+        let mut inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(id) = inner.run.as_ref().map(|run| run.id.clone()) else {
+            return 0;
+        };
+        if inner.ended.as_deref() == Some(id.as_str()) {
+            return 0;
+        }
+        inner.ended = Some(id);
+    }
+    let released = release_bridges().await;
+    if released > 0 {
+        engine().post(
+            BoardEntry::new(
+                "engine",
+                BoardKind::Note,
+                format!(
+                    "run finished — released {released} agent process{}",
+                    if released == 1 { "" } else { "es" }
+                ),
+            )
+            .about("run"),
+        );
+    }
+    release_checkouts();
+    released
+}
+
 pub async fn release_bridges() -> usize {
     let bridges: Vec<(String, Arc<AcpBridge>)> = {
         let mut inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -6897,6 +6908,32 @@ pub async fn release_bridges() -> usize {
 /// makes the next run's `worktree add` on that path fail, which is a thing the
 /// user needs to see now, not a mystery later.
 fn release_checkouts() {
+    // This run's own checkouts first, then the retained runs behind it.
+    //
+    // The order matters twice over. `reap_checkouts` treats a `Done` run as
+    // reapable, so reaping first reported this run's own directories as an
+    // "older run no longer kept". And the reap path swallows removal failures,
+    // where `release_run` returns them, so the run that matters most was the one
+    // whose failure went unreported.
+    let run = {
+        let inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.run.clone()
+    };
+    let done = run.filter(|run| run.state == RunState::Done);
+    let mut problems = Vec::new();
+    if let Some(run) = &done {
+        let workspace = PathBuf::from(&run.workspace);
+        problems = worktree::release_run(&CommandGit, &workspace, &run.id);
+        // The brief names this directory to every member, so it is where scratch
+        // work lands; it goes with the checkouts.
+        let scratch = super::run_dir(&run.id).join("scratch");
+        if scratch.is_dir() && std::fs::remove_dir_all(&scratch).is_err() {
+            problems.push(format!(
+                "the scratch directory {} could not be removed",
+                scratch.display()
+            ));
+        }
+    }
     // Bounded retention, on every exit whatever this run's state: a failed or
     // interrupted run keeps its checkouts for a post-mortem, but only the ten
     // most recent ones.
@@ -6915,25 +6952,6 @@ fn release_checkouts() {
             )
             .about("run"),
         );
-    }
-    let run = {
-        let inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.run.clone()
-    };
-    let Some(run) = run else { return };
-    if run.state != RunState::Done {
-        return;
-    }
-    let workspace = PathBuf::from(&run.workspace);
-    let mut problems = worktree::release_run(&CommandGit, &workspace, &run.id);
-    // The brief names this directory to every member, so it is where scratch
-    // work lands; it goes with the checkouts.
-    let scratch = super::run_dir(&run.id).join("scratch");
-    if scratch.is_dir() && std::fs::remove_dir_all(&scratch).is_err() {
-        problems.push(format!(
-            "the scratch directory {} could not be removed",
-            scratch.display()
-        ));
     }
     if !problems.is_empty() {
         engine().post(
@@ -9620,6 +9638,7 @@ name: a");
             driver_lock: None,
             board_bytes: 0,
             stopped: BTreeSet::new(),
+            ended: None,
         };
         let bridge = Arc::new(AcpBridge::with_sink(Arc::new(
             crate::acp::bridge::NullSink,

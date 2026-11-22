@@ -1,0 +1,109 @@
+{
+  "members": {
+    "lead": [
+      {
+        "files": {
+          "<inbox>/plan.json": {
+            "goal": "Raise a and b to 2, each with its own test.",
+            "tasks": [
+              {
+                "id": "t1",
+                "title": "Raise a",
+                "detail": "Set src/a.js to export a = 2 and add test/a.test.js asserting it.",
+                "files": ["src/a.js", "test/a.test.js"],
+                "deps": [],
+                "acceptance": "node --test test/a.test.js"
+              },
+              {
+                "id": "t2",
+                "title": "Raise b",
+                "detail": "Set src/b.js to export b = 2 and add test/b.test.js asserting it.",
+                "files": ["src/b.js", "test/b.test.js"],
+                "deps": ["t1"],
+                "acceptance": "node --test test/b.test.js"
+              }
+            ],
+            "integrationSuite": "node --test",
+            "notes": ""
+          }
+        }
+      }
+    ],
+    "w-t1": [
+      {
+        "sh": [
+          "printf 'export const a = 2;\\n' > src/a.js",
+          "printf \"import test from 'node:test';\\nimport assert from 'node:assert/strict';\\nimport { a } from '../src/a.js';\\n\\ntest('a is 2', () => assert.equal(a, 2));\\n\" > test/a.test.js",
+          "git add -A && git commit -qm 't1: a is 2'"
+        ],
+        "files": {
+          "<inbox>/evidence.json": {
+            "kind": "evidence",
+            "task": "t1",
+            "text": "Ran `node --test test/a.test.js` in the worktree: pass 1, fail 0.",
+            "evidence": ["node --test test/a.test.js -> pass 1 fail 0"]
+          }
+        }
+      }
+    ],
+    "v-t1": [
+      {
+        "files": {
+          "<inbox>/verdict.json": {
+            "kind": "verdict",
+            "task": "t1",
+            "text": "passed. The criterion fails on the base commit and passes on the change.",
+            "evidence": ["node --test test/a.test.js -> exit 1 on base, exit 0 on the branch"],
+            "command": "node --test test/a.test.js"
+          }
+        }
+      }
+    ],
+    "w-t2": [
+      {
+        "sh": [
+          "printf 'export const b = 2;\\n' > src/b.js",
+          "printf \"import test from 'node:test';\\nimport assert from 'node:assert/strict';\\nimport { b } from '../src/b.js';\\n\\ntest('b is 2', () => assert.equal(b, 2));\\n\" > test/b.test.js",
+          "git add -A && git commit -qm 't2: b is 2'"
+        ],
+        "files": {
+          "<inbox>/evidence.json": {
+            "kind": "evidence",
+            "task": "t2",
+            "text": "Ran `node --test test/b.test.js` in the worktree: pass 1, fail 0.",
+            "evidence": ["node --test test/b.test.js -> pass 1 fail 0"]
+          }
+        }
+      }
+    ],
+    "v-t2": [
+      {
+        "files": {
+          "<inbox>/verdict.json": {
+            "kind": "verdict",
+            "task": "t2",
+            "text": "passed. The criterion fails on the base commit and passes on the change.",
+            "evidence": ["node --test test/b.test.js -> exit 1 on base, exit 0 on the branch"],
+            "command": "node --test test/b.test.js"
+          }
+        }
+      }
+    ],
+    "reflect": [
+      {
+        "files": {
+          "<inbox>/gotchas.json": {
+            "summary": "Two independent modules, one test each.",
+            "gotchas": [
+              {
+                "file": "test/base.test.js",
+                "text": "The base suite runs with `node --test`, so a new test file is picked up without a runner change.",
+                "source": "verdict t1"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

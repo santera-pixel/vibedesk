@@ -393,29 +393,89 @@ The four tests added or rewritten by this pass are `a_chain_is_not_sent_back`,
 `a_one_wide_first_rank_is_a_one_shot_send_back`, which now uses a plan with a
 wide later rank instead of a chain.
 
-### Still not done
+### The priced run, and the three defects the suite found afterwards
 
-- **Money is still unmeasured on this machine, because `deepseek` has no
-  `rates::RATES` row.** Both rehearsal runs reported `spendMicros: null` with
-  `unpricedModels: ["deepseek"]`, which is the intended behaviour - a partial sum
-  presented as a bill is worse than no sum - but it means the money ceiling has
-  never been exercised against a real price. The fix is a rate row supplied by the
-  user; inventing one would be the guess the ledger exists to refuse. Until then
-  the only honest ceiling is the token one, and `token_pct` is the number that
-  reads against it.
-- **`--budget-micros` therefore cannot stop a `deepseek` run.** `exceeded()` reads
-  `(max_spend_micros, spend_micros)` and returns false while the spend is unknown,
-  so a run on unpriced models is bounded by `maxTokens` and the wall clock only.
-  That is deliberate - failing every unpriced run would make local models unusable
-  - but it is a real gap in the money ceiling, not a completed feature.
+The rehearsal above priced nothing, because `deepseek` had no `rates::RATES` row.
+The user supplied the figures — **$0.30/M input, $1.20/M output, $0.007/M cached
+input** — and `RATES_VERSION` is now 2 with that row. Cache writes are not quoted
+by the provider, so they bill as input; that is stated in `rates::price` rather
+than assumed to be free.
+
+A live run on the priced table (`swarm-run`, model `deepseek`, `--budget-micros
+1500000`, real agent, goal "add divide + its test") finished `done` in 247 s with
+`spendMicros 345260` ($0.3453, 23.0% of the $1.50 ceiling), `unpricedModels []`,
+`ratesVersion 2`, 0 restarts, 2/2 verified and the integration suite passing. The
+money ceiling is now exercised against a real price, which is what the earlier
+"Still not done" bullets were waiting for.
+
+Three defects came out of the work that followed, none of them visible in the
+audit's material:
+
+**Defect E — the runner released nothing, and the log said nothing.** That same
+priced run left four `vibe-acp` processes alive and the run's checkout directory
+behind, and the runner then lingered for six minutes until its children happened
+to die. `swarm-run` returns from `main` on its own poll loop, which drops the
+runtime and cancels the drive loop before its next tick can release anything. The
+release now happens on the runner's own path through one function,
+`engine::end_of_run`, and the drive loop's terminal branch calls the same one.
+`Inner::ended` records the run whose release has already happened, so the two
+callers cannot both do it — they were posting the reap note twice for one run.
+A sim run went from "exit after the children die" to `exit 0` in 8 s with
+`released 4 agent processes` on the board.
+
+**Defect F — the grant check re-accused a worker that had complied, forever.**
+`worktree::changed_paths` read commit history (`log --no-merges --name-only`),
+and a deletion commit names the file it deletes. So the corrective commit that
+removed a stray file reported that stray file as delivered again: the worker did
+what it was told, the engine refused the handoff again, the verifier's scripted
+turns ran out, and the run stalled with a clean branch. Measured on the branch
+the test leaves behind: history named `stray.js`, the tree at `HEAD` did not, and
+the net diff was `src/a.js`, `test/a.test.js`. It is now history ∩ net diff — a
+file the branch does not differ on is not part of what the branch delivers — with
+two tests pinning both sides: a path taken back is dropped, a granted deletion is
+kept.
+
+**Defect G — the scripted agent reported evidence before doing the work.** The
+double wrote `files` before running `sh`, so the engine saw `evidence.json` while
+the branch still had no commit, refused the handoff as "delivered none of its
+granted files", and spent an attempt on the double's ordering. Work first,
+evidence second. The counter that keeps the double's position in its script was
+also keyed per member rather than per run, so a second run against the same data
+directory answered nothing and looked exactly like an engine stall; it is keyed
+by run now.
+
+`scripts/swarm-sim.sh` is the harness that found these: it rebuilds the workspace
+from a seed commit every run, takes the capability config from the app's own data
+directory rather than inventing one, runs the headless runner against the double
+with `--budget-micros`, and prints the exit code, wall clock, leftover worktrees
+and surviving processes.
+
+| Command | Result |
+|---|---|
+| `cargo test --lib -- swarm::` | 672 passed, 0 failed, 6 ignored, 10.91 s |
+| `cargo test --test swarm_e2e` | 6 passed, 0 failed, 64.55 s — six serial runs of 9-13 s each |
+| `scripts/swarm-sim.sh`, twice back to back | `exit=0` in 10 s and 10 s, 2/2 verified, `released 4`, `worktrees_left=0 sim_processes=0` |
+| `~/.vibe/worktrees` after the suite | 0 entries |
+
+The e2e suite's "has been running for over 60 seconds" line is libtest counting
+the mutex wait, not a slow test: the six runs are serialised by a global engine
+lock, so the last one starts ~53 s after the suite does and finishes ~11 s later.
+
+### Still not done (updated)
+
+- **Money is measured now, on one model only.** `deepseek` is priced; a run on a
+  model without a row still reports `spendMicros: null` and is bounded by
+  `maxTokens` and the wall clock, which is the correct behaviour but leaves the
+  money ceiling unexercised for that model.
 - **`RATES` is a table, not a bill.** The numbers are the published per-model
   rates at the version in `rates_version`; a run on a model the table does not
   know reports itself as unpriced rather than guessing (verified by
   `an_unknown_model_is_unpriced_rather_than_free`), but a provider that changes its prices makes
   the ledger wrong until the table is updated.
-- **Cache-write tokens are not counted.** `Usage` tracks reads and totals, not
-  writes, so a provider that bills writes reports a floor. Documented in
-  `rates::price`, not fixed.
+- **Cache-write tokens are not counted separately.** `Usage` tracks reads and
+  totals, not writes, so a write is billed at the input rate: a floor, not a
+  bill, for a provider that charges more to write a cache entry than to send the
+  same tokens fresh. Stated in `rates::price`, not fixed.
 
 ---
 

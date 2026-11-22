@@ -24,7 +24,7 @@
 
 /// The table's version. Bump it whenever a number below changes, so a reported
 /// spend can be traced to the rates it was computed with.
-pub const RATES_VERSION: u32 = 1;
+pub const RATES_VERSION: u32 = 2;
 
 /// Published list prices, in millionths of a dollar per million tokens.
 ///
@@ -91,6 +91,12 @@ pub const RATES: &[ModelRate] = &[
     ModelRate {
         model: "devstral",
         rate: rate(100_000, 10_000, 125_000, 300_000),
+    },
+    // DeepSeek through Mistral's API: $0.30/M in, $0.007/M cached, $1.20/M out,
+    // quoted 2026-11-22. Cache writes were not quoted, so they bill as input.
+    ModelRate {
+        model: "deepseek",
+        rate: rate(300_000, 7_000, 300_000, 1_200_000),
     },
     // Anthropic. Cache writes are billed above fresh input, which is why they
     // have their own column.
@@ -196,6 +202,22 @@ mod tests {
             (10_000_000..=11_000_000).contains(&spend),
             "expected about ten dollars, got {spend} µusd"
         );
+    }
+
+    /// The row the rehearsal needed: before it existed, every run on this machine
+    /// reported its money as unknown.
+    #[test]
+    fn deepseek_is_priced_at_the_quoted_rate() {
+        let row = for_model("deepseek").expect("the rehearsal's model is priced");
+        assert_eq!(row.input, 300_000, "$0.30 per million fresh input");
+        assert_eq!(row.cache_read, 7_000, "$0.007 per million cached");
+        assert_eq!(row.output, 1_200_000, "$1.20 per million output");
+        assert_eq!(
+            row.cache_write, row.input,
+            "the cache-write column was not quoted, so it bills as input"
+        );
+        assert_eq!(price("deepseek", 1_000_000, 0, 1_000_000), Some(1_500_000));
+        assert_eq!(for_model("deepseek-v4.1-flash"), Some(row), "dated ids resolve");
     }
 
     /// A model the table does not price has no price, and zero would be a lie.

@@ -144,6 +144,21 @@ fn state_dir() -> PathBuf {
     dir
 }
 
+/// The run an inbox belongs to, from `<runs>/<run>/inbox/<member>`.
+///
+/// The counter is keyed by run, not only by member. A run replays the script from
+/// its first step, so two runs sharing a counter file would make the second one
+/// start partway through the script and answer nothing — a harness that fails
+/// silently and looks like an engine stall.
+fn run_from_inbox(inbox: &str) -> Option<String> {
+    Path::new(inbox)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
 fn prompt_text(params: &Value) -> String {
     params
         .get("prompt")
@@ -225,7 +240,12 @@ fn run_step(script: &Value, state: &Path, prompt: &str) {
         return;
     };
 
-    let counter = state.join(format!("{member}.n"));
+    let mut counters = state.to_path_buf();
+    if let Some(run) = run_from_inbox(&inbox) {
+        counters = counters.join(run);
+        let _ = std::fs::create_dir_all(&counters);
+    }
+    let counter = counters.join(format!("{member}.n"));
     let index: usize = std::fs::read_to_string(&counter)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -236,6 +256,17 @@ fn run_step(script: &Value, state: &Path, prompt: &str) {
     };
     let _ = std::fs::write(&counter, (index + 1).to_string());
     eprintln!("sim: {member} step {index}");
+
+    if let Some(commands) = step.get("sh").and_then(Value::as_array) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        for command in commands.iter().filter_map(Value::as_str) {
+            let _ = Command::new(bash())
+                .arg("-c")
+                .arg(command)
+                .current_dir(&cwd)
+                .output();
+        }
+    }
 
     if let Some(files) = step.get("files").and_then(Value::as_object) {
         for (path, body) in files {
@@ -248,17 +279,6 @@ fn run_step(script: &Value, state: &Path, prompt: &str) {
                 None => body.to_string(),
             };
             let _ = std::fs::write(&path, text);
-        }
-    }
-
-    if let Some(commands) = step.get("sh").and_then(Value::as_array) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        for command in commands.iter().filter_map(Value::as_str) {
-            let _ = Command::new(bash())
-                .arg("-c")
-                .arg(command)
-                .current_dir(&cwd)
-                .output();
         }
     }
 }

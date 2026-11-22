@@ -693,26 +693,38 @@ pub fn reap_checkouts(git: &dyn Git) -> Vec<String> {
     )
 }
 
-/// Every path a worker committed on its own branch, since `base`.
+/// Every path a worker committed on its own branch that the branch still
+/// differs from `base` on.
 ///
-/// `--no-merges` is the whole point: `merge_deps` merges the dependency branches
-/// into the task's branch, so a plain diff would report every dependency's files
-/// as the worker's work and the grant check would fire on correct behaviour.
-/// What is left is the commits the worker itself made.
+/// Two git calls, intersected, because either alone answers the wrong question.
 ///
-/// One git call, not one per commit. The output is a commit header line per
-/// commit and a path per line under it; `--format=` empties the header, so the
-/// non-empty lines are exactly the paths.
+/// `--no-merges` on the log keeps `merge_deps`'s dependency branches out: a
+/// plain diff against `base` reports every dependency's files as the worker's
+/// work, and the grant check then fires on correct behaviour. What is left is
+/// the commits the worker itself made.
+///
+/// The diff then removes the paths the worker named and took back. A deletion
+/// commit mentions the file it removes, so history alone reported a stray file
+/// as delivered again on the very commit that removed it — the worker complied
+/// and was re-accused, forever, and the task never converged. A file whose
+/// content the branch no longer differs on is not part of what the branch
+/// carries, so it is not part of what the worker delivered.
 pub fn changed_paths(git: &dyn Git, path: &Path, base: &str) -> Result<Vec<String>, String> {
     let range = format!("{base}..HEAD");
-    let out = git.run(
+    let history = git.run(
         &["log", "--no-merges", "--name-only", "--format=", &range],
         path,
     )?;
+    let net = git.run(&["diff", "--name-only", base, "HEAD"], path)?;
+    let present: Vec<&str> = net
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
     let mut seen: Vec<String> = Vec::new();
-    for line in out.lines() {
+    for line in history.lines() {
         let line = line.trim();
-        if line.is_empty() || seen.iter().any(|s| s == line) {
+        if line.is_empty() || !present.contains(&line) || seen.iter().any(|s| s == line) {
             continue;
         }
         seen.push(line.to_string());
@@ -1674,6 +1686,10 @@ mod tests {
             "log --no-merges --name-only --format= base..HEAD",
             Ok("\nsrc/logic/gates.js\n\ntest/gates.test.js\nsrc/logic/gates.js\n"),
         );
+        git.on(
+            "diff --name-only base HEAD",
+            Ok("src/logic/gates.js\ntest/gates.test.js\n"),
+        );
         let paths = changed_paths(&git, &repo(), "base").unwrap();
         assert_eq!(
             paths,
@@ -1687,6 +1703,40 @@ mod tests {
             git.calls().iter().any(|c| c.contains("--no-merges")),
             "a merge commit's files are the dependency's, not the worker's"
         );
+    }
+
+    #[test]
+    fn a_path_the_worker_took_back_is_not_delivered() {
+        // The corrective commit names the stray file it removes, so history alone
+        // reported the stray as delivered on every retry: the grant check
+        // re-accused a worker that had already complied and the task never
+        // converged. The run stalled after the retry with the branch clean.
+        let git = FakeGit::new();
+        git.on(
+            "log --no-merges --name-only --format= base..HEAD",
+            Ok("\nstray.js\nsrc/a.js\ntest/a.test.js\n\nstray.js\n"),
+        );
+        git.on("diff --name-only base HEAD", Ok("src/a.js\ntest/a.test.js\n"));
+        let paths = changed_paths(&git, &repo(), "base").unwrap();
+        assert_eq!(
+            paths,
+            vec!["src/a.js".to_string(), "test/a.test.js".to_string()],
+            "a file the branch no longer carries is not part of what it delivers"
+        );
+    }
+
+    #[test]
+    fn a_granted_file_the_worker_deleted_is_still_delivered() {
+        // The other side of the same rule: the branch does differ on a deletion,
+        // so a task granted the removal is still held to it.
+        let git = FakeGit::new();
+        git.on(
+            "log --no-merges --name-only --format= base..HEAD",
+            Ok("\nsrc/old.js\n"),
+        );
+        git.on("diff --name-only base HEAD", Ok("src/old.js\n"));
+        let paths = changed_paths(&git, &repo(), "base").unwrap();
+        assert_eq!(paths, vec!["src/old.js".to_string()]);
     }
 
     #[test]
