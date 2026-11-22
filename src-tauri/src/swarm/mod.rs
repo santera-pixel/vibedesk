@@ -449,6 +449,17 @@ pub struct Task {
     pub verdict: Option<Verdict>,
     #[serde(default)]
     pub branch: Option<String>,
+    /// The commit the verifier's verdict is earned on, pinned when the task is
+    /// handed over and asserted unchanged when the verdict arrives.
+    ///
+    /// Integration merges this, not the branch. A branch is a pointer anything
+    /// with a shell can move: the audited run's v-t2 committed the worker's
+    /// missing files as `e18875b` and repointed `swarm/…-t2` at it *after*
+    /// returning `passed: false`, so the tip integration would have merged was a
+    /// tree no verdict ever judged. `None` on a run adopted from disk before
+    /// this field existed, which is why integration falls back to the branch.
+    #[serde(default)]
+    pub verified_commit: Option<String>,
     /// The commit this task's work started from: the run's base, with every
     /// dependency already merged in.
     ///
@@ -544,6 +555,7 @@ impl Task {
             attempts: 0,
             verdict: None,
             branch: None,
+            verified_commit: None,
             base_commit: None,
             worktree: None,
             started_at: None,

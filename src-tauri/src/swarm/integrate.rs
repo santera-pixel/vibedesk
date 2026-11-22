@@ -76,7 +76,18 @@ pub fn integrate(git: &dyn Git, repo: &Path, run: &mut Run) -> IntegrationOutcom
             ));
         };
 
-        match worktree::merge(git, repo, &branch) {
+        // Merge the commit the verdict was earned on, not the branch tip. The
+        // two differ only when the branch moved after the verdict, and that case
+        // is already refused when the verdict arrives — this is the second
+        // boundary, because integration is where a wrong tree becomes the
+        // result. A task adopted from disk before the field existed has `None`,
+        // so the branch remains the fallback rather than a hard failure.
+        let target = task
+            .verified_commit
+            .clone()
+            .unwrap_or_else(|| branch.clone());
+
+        match worktree::merge(git, repo, &target) {
             Ok(MergeOutcome::Clean) => {
                 run.integration.merged.push(task_id.clone());
             }
@@ -89,7 +100,7 @@ pub fn integrate(git: &dyn Git, repo: &Path, run: &mut Run) -> IntegrationOutcom
                     task: task_id.clone(),
                     files: files.clone(),
                     detail: format!(
-                        "merging {branch} conflicted on {}",
+                        "merging {target} conflicted on {}",
                         files.join(", ")
                     ),
                 });
@@ -258,6 +269,32 @@ mod tests {
         assert_eq!(merges.len(), 2);
         assert!(merges[0].contains("swarm/run-1/t1"), "{}", merges[0]);
         assert!(merges[1].contains("swarm/run-1/t2"), "{}", merges[1]);
+    }
+
+    #[test]
+    fn integration_merges_the_commit_the_verdict_was_earned_on() {
+        // The branch can move after the verdict; the tree that was judged is the
+        // one that gets integrated. Without the pin, this merges the tip.
+        let git = FakeGit::new();
+        git.on("merge --no-ff", Ok("ok"));
+        let mut t1 = verified("t1", &[], &["a"]);
+        t1.verified_commit = Some("e18875b".into());
+        let mut run = run_with(vec![t1]);
+        let outcome = integrate(&git, &PathBuf::from("/tmp/repo"), &mut run);
+        assert!(matches!(outcome, IntegrationOutcome::Merged { .. }));
+
+        let merges: Vec<String> = git
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("merge --no-ff"))
+            .collect();
+        assert_eq!(merges.len(), 1);
+        assert!(merges[0].contains("e18875b"), "{}", merges[0]);
+        assert!(
+            !merges[0].contains("swarm/run-1/t1"),
+            "the branch tip must not be what gets merged: {}",
+            merges[0]
+        );
     }
 
     #[test]

@@ -2477,6 +2477,46 @@ async fn drive_turn(
     restart_or_fail(sink, member_id, &message);
 }
 
+/// Whether a restart could be charged, and why not when it could not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Charge {
+    /// Charged. The member is now `Starting` with a fresh session slot.
+    Allowed,
+    /// A restart is already in flight for this member.
+    AlreadyRestarting,
+    /// The budget is gone. The member is failed, not retried.
+    Exhausted,
+}
+
+/// Charge one restart against a member's budget, at most once per death.
+///
+/// The single place `respawns` moves. Two paths notice a dead member — a failed
+/// turn (`after_turn_error`) and the idle clock (`respawn_dead`) — and they fire
+/// independently: the audited run's w-t1 logged the nudge, the idle restart, the
+/// failed nudge delivery and the error restart inside 29 ms, and finished at
+/// `respawns = 2` having restarted once. One event, two slots of a two-slot
+/// budget, so the member was never restarted again and sat `Working` with no
+/// process for the rest of the run.
+///
+/// `Starting` is the flag that makes it idempotent: both paths set it as part of
+/// charging, so whichever loses the race sees a restart already in flight rather
+/// than a member to charge for.
+fn charge_restart(member: &mut Member) -> Charge {
+    if member.state == MemberState::Starting {
+        return Charge::AlreadyRestarting;
+    }
+    if member.respawns >= MAX_RESPAWNS {
+        return Charge::Exhausted;
+    }
+    member.respawns += 1;
+    member.state = MemberState::Starting;
+    member.session_id = None;
+    member.pid = None;
+    member.nudges = 0;
+    member.last_at = Some(now());
+    Charge::Allowed
+}
+
 /// What to do about a member that could not get an answer.
 ///
 /// Pure, so the decision is testable without a live agent: the effect is a
@@ -2498,30 +2538,30 @@ fn after_turn_error(run: &mut Run, member_id: &str, error: &str) -> Option<Resta
     let task = member.task.clone();
     let verify = member.role == Role::Verifier;
     let lead = member.role == Role::Lead;
-    let spent = member.respawns >= MAX_RESPAWNS;
-    member.respawns += 1;
     member.error = Some(error.to_string());
-    if spent || lead {
-        member.state = MemberState::Failed;
-    } else {
-        member.state = MemberState::Starting;
-        member.session_id = None;
-        member.pid = None;
-        member.nudges = 0;
-        member.last_at = Some(now());
-    }
+    let charge = charge_restart(member);
     if lead {
+        member.state = MemberState::Failed;
         run.state = RunState::Failed;
         run.failure = Some(format!("the lead could not get an answer: {error}"));
         return None;
     }
-    let task = task?;
-    if spent {
-        if let Some(record) = run.task_mut(&task) {
-            record.state = TaskState::Failed;
+    match charge {
+        // Another path noticed this death first and has already paid for the
+        // restart. Returning here is what stops one process exit consuming two
+        // slots of the budget.
+        Charge::AlreadyRestarting => return None,
+        Charge::Exhausted => {
+            member.state = MemberState::Failed;
+            let task = task?;
+            if let Some(record) = run.task_mut(&task) {
+                record.state = TaskState::Failed;
+            }
+            return None;
         }
-        return None;
+        Charge::Allowed => {}
     }
+    let task = task?;
     Some(Restart {
         member: member_id.to_string(),
         task,
@@ -3059,22 +3099,20 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
     if restarted.is_empty() {
         return None;
     }
-    for (id, _, _) in &restarted {
-        if let Some(member) = next.member_mut(id) {
-            member.respawns += 1;
-            member.state = MemberState::Starting;
-            member.session_id = None;
-            member.pid = None;
-            member.nudges = 0;
-            member.last_at = Some(now());
-        }
-    }
     next.touch();
-    let _ = next.save();
-    write_run(&next);
-    emit(sink, &next);
     let mut restarts = Vec::new();
     for (id, task_id, verify) in restarted {
+        // Charged through the one owner, and skipped when another path has
+        // already paid for this death or the budget is gone. The old code
+        // incremented unconditionally here *and* in `after_turn_error`, so one
+        // process exit could spend both slots.
+        let allowed = next
+            .member_mut(&id)
+            .map(charge_restart)
+            .unwrap_or(Charge::Exhausted);
+        if allowed != Charge::Allowed {
+            continue;
+        }
         {
             let mut inner = engine().inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.bridges.remove(&id);
@@ -3101,6 +3139,14 @@ fn respawn_dead(sink: &Arc<dyn EventSink>, run: &Run, busy: &dyn Fn(&str) -> boo
             reason,
         });
     }
+    if restarts.is_empty() {
+        return None;
+    }
+    // Saved after the charges, not before: a crash between the two would leave
+    // the restart on disk with no budget spent against it.
+    let _ = next.save();
+    write_run(&next);
+    emit(sink, &next);
     Some((next, restarts))
 }
 
@@ -4430,10 +4476,21 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                         .about(task_id),
                     );
                 }
+                // Pin the tree the verdict will be about. The verifier reads the
+                // branch, and a branch is a pointer anything with a shell can
+                // move: the audited run's v-t2 repointed its worker's branch at
+                // its own commit after returning a failing verdict. Capturing the
+                // tip here is what makes the comparison at verdict time mean
+                // something.
+                let judged = {
+                    let path = worktree::worktree_path(&next.id, &format!("w-{task_id}"));
+                    worktree::head(&CommandGit, &path).ok()
+                };
                 if let Some(task) = next.task_mut(task_id) {
                     task.state = TaskState::Verifying;
                     task.verifier = Some(format!("v-{task_id}"));
                     task.out_of_grant = out_of_grant;
+                    task.verified_commit = judged;
                 }
                 // The worker's job is over. Its brief says to stop after posting
                 // evidence, but a model with momentum keeps going: the first live
@@ -4697,9 +4754,32 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                     }
                 }
 
+                // A verdict is about one tree. If the branch moved while the
+                // verifier was reading it, the verdict describes a tree that
+                // cannot be integrated, and merging the new tip would integrate
+                // work nobody judged.
+                let moved = {
+                    let pinned = next.task(task_id).and_then(|t| t.verified_commit.clone());
+                    let branch = next.task(task_id).and_then(|t| t.branch.clone());
+                    match (pinned, branch) {
+                        (Some(pinned), Some(branch)) => {
+                            let repo = PathBuf::from(&next.workspace);
+                            match worktree::rev_parse(&CommandGit, &repo, &branch) {
+                                Ok(tip) if tip != pinned => Some(format!(
+                                    "the branch moved while the verdict was being earned: pinned {pinned}, now {tip}"
+                                )),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                };
                 let verdict = Verdict {
-                    passed,
-                    reason: entry.text.clone(),
+                    passed: passed && moved.is_none(),
+                    reason: match &moved {
+                        Some(why) => format!("{} ({why})", entry.text),
+                        None => entry.text.clone(),
+                    },
                     evidence: entry.evidence.clone(),
                     command: entry.command.clone(),
                     base_exit: proof.base_exit,
@@ -6764,6 +6844,36 @@ mod tests {
         );
         assert_eq!(wedged.members[0].state, MemberState::Failed);
         assert!(wedged.members[0].error.as_deref().unwrap().contains("silent"));
+        std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
+    }
+
+    #[test]
+    fn one_death_charges_one_restart() {
+        // Both the failed-turn path and the idle path reach a dead member. One
+        // exit must spend one slot: the audited run's w-t1 logged the nudge, the
+        // idle restart, the failed nudge and the error restart inside 29 ms, and
+        // ended at `respawns = 2` having restarted once — so it was never
+        // restarted again and sat `Working` with no process.
+        let mut run = run_with_silent_worker(TaskState::Running, MEMBER_IDLE_LIMIT_SECS + 60);
+
+        let first = after_turn_error(&mut run, "w-t1", "the Vibe agent is not running");
+        assert!(first.is_some(), "the first death is restartable");
+        let member = run.member("w-t1").unwrap();
+        assert_eq!(member.respawns, 1, "one death, one slot");
+        assert_eq!(member.state, MemberState::Starting);
+
+        // The other path arriving at the same death must not charge again.
+        let second = after_turn_error(&mut run, "w-t1", "the Vibe agent is not running");
+        assert!(
+            second.is_none(),
+            "a restart already in flight must not be charged twice"
+        );
+        assert_eq!(
+            run.member("w-t1").unwrap().respawns,
+            1,
+            "the budget is spent once per death"
+        );
+
         std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
     }
 
