@@ -16,3 +16,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-11-21 | artifact | docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json | Execute docs/PLAN-polish.md (12 swarm-harness defects, 11 tasks) todo checkpoint draft |
 | 2026-11-21 | artifact | docs/aegis/work/2026-11-21-plan-polish/drift-check-draft.json | Execute docs/PLAN-polish.md (12 swarm-harness defects, 11 tasks) drift check draft |
 | 2026-11-21 | artifact | docs/aegis/work/2026-11-21-plan-polish/resume-state-hint.json | 2026-11-21-plan-polish resume state hint |
+| 2026-11-22 | artifact | docs/aegis/work/2026-11-22-swarm-git-ready/resume-state-hint.json | 2026-11-22-swarm-git-ready resume state hint |

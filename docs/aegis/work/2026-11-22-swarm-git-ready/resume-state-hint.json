@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-11-22-swarm-git-ready",
+  "lastCheckpointRef": "docs/aegis/work/2026-11-22-swarm-git-ready/todo-checkpoint-draft.json",
+  "resumeInstruction": "Verify git log shows 6dbd001 on origin/main; do not touch D:\\VibeDesk\\data\\capabilities.json or the LivingMiniture files",
+  "knownPartialWork": [],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-11-22-swarm-git-ready/10-intent.md",
+    "docs/aegis/work/2026-11-22-swarm-git-ready/20-checkpoint.md",
+    "docs/aegis/work/2026-11-22-swarm-git-ready/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": []
+}
