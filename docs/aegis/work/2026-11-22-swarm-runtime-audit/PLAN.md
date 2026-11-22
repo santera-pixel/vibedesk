@@ -654,6 +654,46 @@ from the audit is that nothing is *locked* — the member processes are gone bef
 the removal is attempted, which is what made `git worktree remove` fail with
 "Permission denied" and what the ordering exists to prevent.
 
+### The app's own UI check, run for the first time
+
+`npm run verify` ends in `live`, a CDP script that drives the real window. It had
+never been run in this work, and the swarm frontend touched `SwarmPanel` and
+`RosterView`, so a real-DOM pass was owed. Debug build plus
+`VIBEDESK_REMOTE_DEBUGGING=9222`, then `node scripts/live-check.mjs all`.
+
+It found three defects, all now fixed and re-run:
+
+- **A refused widget capability was never shown to the user.** The notice is a
+  chat item, and when a panel covers the chat the transcript is not rendered —
+  the check's failure detail said `{"inText":false,"inTree":true}`, which is the
+  sharpest statement of it: present in the DOM, invisible on screen. The block
+  now renders the refused capabilities above its own frame.
+- **The tween sampler counted frames and called them seconds.** 150 frames is
+  2.5 s at 60 Hz and 1.04 s on this 144 Hz display; the failure line reported
+  `150 frames in 1039 ms, visible, focused=true`, which ruled out the throttling
+  theory it was suspected of. It samples 2.5 s of wall clock now.
+- **The refusal was read once instead of waited for**, which is the anti-pattern
+  the file's own `waitFor` doc calls out.
+
+Verified by repetition, not by a single green:
+
+| Run regime | Result |
+| --- | --- |
+| `all`, fresh app process | 230/230, 0 console errors (run 1 of 4) |
+| `all`, back-to-back on one process | 229–230/230, the widget refusal green in every run after the fix |
+| `motion` alone | 8/8 green |
+| `chats` alone | 3/3 green |
+
+**Open, and not fixed: a suite that poisons the next one.** In a fresh-app loop,
+runs 2–4 failed at `chats` (`timed out waiting for the switch to fc2bac`) and then
+`bulk` (`timed out waiting for the chat to open`), while run 1 passed and the same
+suites pass 3/3 alone. A fresh process does the switch correctly when clicked by
+hand in the same state (`marked: 1` after one click), so the app can switch chats
+and something an earlier suite in the same run leaves behind stops the click from
+landing. Not narrowed further. It is in the chat rail, not the swarm, and it is
+recorded here rather than fixed because the honest thing is to name what was not
+finished.
+
 ### Still not done (updated)
 
 - **Money is measured now, on one model only.** `deepseek` is priced; a run on a
