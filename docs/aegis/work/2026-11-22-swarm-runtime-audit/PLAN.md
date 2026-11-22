@@ -583,11 +583,15 @@ one of them is byte-identical to what `npm run tauri:build` produced:
 
 | Binary | md5 build = installed |
 |---|---|
-| `vibedesk.exe` | `b56e9f6299baf0e07fa363338e30ba13` |
-| `swarm-run.exe` | `5bd90931bfc297b30eb290c8087aed2b` |
-| `swarm-mcp.exe` | `5d51b9ee9fbfaebd460b93952822aab0` |
-| `swarm-sim.exe` | `cc9a7d857d91d4d62c7acb09b99b6bb1` |
-| `channel-probe.exe` | `0737af56aacc2c871b9d2ec5e0167056` |
+| `vibedesk.exe` | `52c6958e0e560b4450daefa959458e88` |
+| `swarm-run.exe` | `ce525ebefe2b314d47d19ed1a991d150` |
+| `swarm-mcp.exe` | `e2b5d1ba3a6f1a4cb13bb734e351ccc6` |
+| `swarm-sim.exe` | `accdef0e0f9902fcdbcd5e9e709a35d1` |
+| `channel-probe.exe` | `a9458201daf942c75bc2691730fefbb4` |
+Installed from commit `6145c37` on 2026-11-22 22:40; the earlier row set was the
+build before the widget change, which is why every hash differs.
+
+
 
 A hash is not a run, so the installed pair was driven through a real run: the
 **installed** `swarm-run.exe` against the **installed** `swarm-sim.exe`, a freshly
