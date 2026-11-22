@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Check, ExternalLink, MessageCircleQuestion, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown, ExternalLink, MessageCircleQuestion, X } from 'lucide-react';
 import type { ElicitationProperty, JsonValue } from '@/types/acp';
 import { cn } from '@/lib/utils';
 import { interaction } from '@/lib/bridge';
 import { useApp } from '@/store/app';
 import { errorMessage } from '@/lib/actions';
+import { ContextMenu, MenuItem, anchorUnder, type MenuAnchor } from '@/components/ui/ContextMenu';
 
 type Values = Record<string, JsonValue>;
 
@@ -171,6 +172,82 @@ function label(property: ElicitationProperty, name: string): string {
   return property.title?.trim() || name;
 }
 
+/**
+ * One choice out of a closed list.
+ *
+ * This was a `<select>`, and the control was the only themed part of it: the
+ * list that opens is drawn by the platform, so on Windows it arrived as a white
+ * rectangle with the system font, hanging out of the card and over the composer.
+ * A form that asks the user a question cannot have one element that ignores the
+ * theme it sits in.
+ *
+ * So the closed control is a button and the open list is the app's own menu,
+ * which is portalled into `body` — it cannot be clipped by the card — and
+ * already carries the keyboard behaviour a picker needs: arrows, Home, End,
+ * Enter, Escape, and focus going back to the trigger. The menu is a menu: it is
+ * not a tab stop, so `aria-haspopup` and `aria-expanded` describe it rather than
+ * pretending it is a native select's popup.
+ */
+function Choice({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: { value: string; title: string }[];
+  onChange: (value: string) => void;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
+  const current = options.find((option) => option.value === value);
+  const chosen = value !== '';
+
+  const open = () => {
+    if (trigger.current) setAnchor(anchorUnder(trigger.current, options.length));
+  };
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={anchor !== null}
+        onClick={open}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
+            event.preventDefault();
+            open();
+          }
+        }}
+        className={cn(
+          'vd-input flex w-full items-center gap-1.5 !h-[28px] !text-[11.5px] text-left',
+          !chosen && 'text-[var(--vd-text-tertiary)]',
+        )}
+      >
+        <span className="min-w-0 flex-1 truncate">{current?.title ?? 'Choose…'}</span>
+        <ChevronDown size={11} strokeWidth={2} className="shrink-0 opacity-60" />
+      </button>
+
+      {anchor && (
+        <ContextMenu anchor={anchor} onClose={() => setAnchor(null)}>
+          {options.map((option) => (
+            <MenuItem
+              key={option.value}
+              label={option.title}
+              icon={option.value === value ? Check : undefined}
+              onSelect={() => {
+                onChange(option.value);
+                setAnchor(null);
+              }}
+            />
+          ))}
+        </ContextMenu>
+      )}
+    </>
+  );
+}
+
 function Field({
   name,
   property,
@@ -203,18 +280,11 @@ function Field({
 
       <div className="mt-1">
         {options ? (
-          <select
+          <Choice
             value={text}
-            onChange={(event) => onChange(event.target.value)}
-            className="vd-input !h-[28px] w-full !text-[11.5px]"
-          >
-            <option value="">Choose…</option>
-            {options.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.title}
-              </option>
-            ))}
-          </select>
+            options={[{ value: '', title: 'Choose…' }, ...options]}
+            onChange={onChange}
+          />
         ) : property.type === 'boolean' ? (
           <button
             type="button"

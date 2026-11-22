@@ -22,6 +22,24 @@ export function anchorAt(event: MouseEvent, rows: number): MenuAnchor {
 }
 
 /**
+ * Anchor a menu under an element rather than at a click point.
+ *
+ * A picker that opens from a button has no cursor to anchor to, and a menu that
+ * starts at the button's top edge covers the button. It opens below the control
+ * and is clamped the same way `anchorAt` clamps, so a field near the bottom of
+ * the window opens upward instead of off-screen.
+ */
+export function anchorUnder(element: HTMLElement, rows: number): MenuAnchor {
+  const rect = element.getBoundingClientRect();
+  const below = rect.bottom + 4;
+  const above = rect.top - rows * ROW_HEIGHT - 4;
+  return {
+    x: Math.max(EDGE, Math.min(rect.left, window.innerWidth - MENU_WIDTH - EDGE)),
+    y: Math.max(EDGE, below + rows * ROW_HEIGHT > window.innerHeight - EDGE ? above : below),
+  };
+}
+
+/**
  * The keyboard equivalent of a right-click. Shift+F10 is the Windows
  * convention and the Menu key is the one on the keyboard, so both open the menu
  * anchored to the bottom-left of the row that has focus.
@@ -138,7 +156,7 @@ export function MenuItem({
   disabled,
   onSelect,
 }: {
-  icon: LucideIcon;
+  icon?: LucideIcon;
   label: string;
   shortcut?: string;
   danger?: boolean;
@@ -154,7 +172,7 @@ export function MenuItem({
       onClick={onSelect}
       className={cn('vd-menu-item', danger && 'vd-menu-item-danger')}
     >
-      <Icon size={11} strokeWidth={2} className="shrink-0 opacity-70" />
+      {Icon && <Icon size={11} strokeWidth={2} className="shrink-0 opacity-70" />}
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {shortcut && <span className="vd-menu-shortcut">{shortcut}</span>}
     </button>
