@@ -2,6 +2,19 @@
 
 ## Current Checkpoint
 
+- Current todo: docs/README/technical split done
+- Active slice: README layman rewrite + screenshots + push
+- Completed todos:
+- none
+- Evidence refs:
+- none
+- Blocked on: none
+- Next step: none; work pushed to origin main @ 9af12c4
+
+## Recent Checkpoint History
+
+## Checkpoint Update
+
 - Current todo: t1-t10 done and pushed; t11 skipped per user (games tested in build); cleanup+upload done
 - Active slice: PLAN-polish execution complete except t11; repo published
 - Completed todos:
@@ -10,9 +23,6 @@
 - gh repo view santera-pixel/vibedesk => PUBLIC pushed 2026-11-22T08:28:34Z main; git status clean; git ls-files 289, 0 ignored-paths tracked; cargo build --release Finished 5m07s; find sources -newer release exe => 0
 - Blocked on: none
 - Next step: User runs the games (t11) in the build; re-index vibedesk in codebase-memory on next session (.codebase-memory was deleted)
-
-## Recent Checkpoint History
-
 ## Checkpoint Update
 
 - Current todo: t8-t10 done; t11 (end-to-end games) NOT started - needs live model runs (CPU-heavy), awaiting user go-ahead
@@ -53,13 +63,3 @@
 - cargo test --lib: 1494 passed 0 failed; no_op tests: amend NoOp x2 + engine replanning no-op
 - Blocked on: none
 - Next step: Task 4 edits in roles.rs + engine.rs release_checkouts, then Task 5
-## Checkpoint Update
-
-- Current todo: t2 done (retire_verifier, RED->GREEN proven); full lib suite running; t3 next: amend.rs typed NoOp
-- Active slice: Task 2 of docs/PLAN-polish.md completed; verifying with full cargo test --lib
-- Completed todos:
-- t1: stop_process kill-before-lock + blocked-pipe test (RED 2.53s timeout -> GREEN 0.53s; suite 1492 passed 0 failed); t2: retire_verifier drops+stops verifier bridge on verdict, parks member (RED 'bridge must be dropped' -> GREEN)
-- Evidence refs:
-- cargo test --lib stop_returns_while (RED Elapsed then GREEN 0.53s); cargo test --lib retires_the_verifiers (RED bridge_gone then GREEN); full suite tail pending
-- Blocked on: none
-- Next step: Confirm full suite green, then Task 3: typed NoOp error in amend.rs + benign handling in engine.rs

@@ -2,16 +2,12 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-11-21-plan-polish",
   "lastCheckpointRef": "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json",
-  "resumeInstruction": "Repo is now a git repo at D:/MistralVibe on main, origin=santera-pixel/vibedesk (public); work record at docs/aegis/work/2026-11-21-plan-polish",
-  "knownPartialWork": [
-    "t1-t10 verified (649 rust tests targeted, 291 frontend, tsc, release build); folder cleaned (.scratch .shots .codebase-memory .repos target/debug target/tmp deleted, user-confirmed); release rebuilt 2026-11-22 10:19-10:21 (0 sources newer than exe); git init+commit c550d05+push main to public santera-pixel/vibedesk (289 tracked files, 0 junk); github MCP server added to ~/.vibe/config.toml (stdio npx @modelcontextprotocol/server-github, token via ~/.vibe/.env GITHUB_PERSONAL_ACCESS_TOKEN - user adds)"
-  ],
+  "resumeInstruction": "Repo is clean and in sync with origin/main @ 9af12c4. README.md is the layman doc, technical.md the old 2008-line reference, docs/screenshots/ has 5 captured PNGs. Channeler connector was not callable this session; screenshots were taken via the app's own CDP endpoint (VIBEDESK_REMOTE_DEBUGGING + scripts/live-check.mjs shot/eval).",
+  "knownPartialWork": [],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-11-21-plan-polish/10-intent.md",
     "docs/aegis/work/2026-11-21-plan-polish/20-checkpoint.md",
     "docs/aegis/work/2026-11-21-plan-polish/todo-checkpoint-draft.json"
   ],
-  "unsafeToAssume": [
-    "github MCP tools not loaded in this session (added post-start); gh CLI was used for the push; vibedesk cbm index deleted, rebuilds on next index_repository"
-  ]
+  "unsafeToAssume": []
 }
