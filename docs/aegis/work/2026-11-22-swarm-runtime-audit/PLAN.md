@@ -268,7 +268,7 @@ a per-task deadline is `stalled`.
 
 ## 5a. Implementation status
 
-Landed and verified in this pass (plan order, first two):
+Landed and verified in this pass (plan order):
 
 - **D2.1 merge the judged SHA** — `Task.verified_commit` pinned at handoff
   (engine.rs handoff block), asserted unchanged when the verdict arrives (a moved
@@ -279,12 +279,41 @@ Landed and verified in this pass (plan order, first two):
   `respawns` moves; `after_turn_error` and `respawn_dead` both go through it, and
   `Starting` makes it idempotent so one death spends one slot. `respawn_dead`
   persists after charging. Regression test `one_death_charges_one_restart` passes.
+- **D2.2 member identity** — `worktree::identity` / `set_identity`, applied by
+  `add_worktree` from the checkout's directory name, so every worktree commits as
+  `swarm-<member>` / `<member>@swarm.local`. `worktree::authors` reads author
+  emails over `base..tip`; `integrate` refuses a branch carrying an author that
+  is not that task's worker. Tests:
+  `a_commit_the_worker_did_not_author_is_refused`,
+  `the_workers_own_commits_integrate`, and the add-worktree test now asserts the
+  two identity calls.
+- **D2.3 verifier cannot author** — `permissions::authorship` refuses `git add`,
+  `git commit`, `git checkout -b`, `git stash`, shell redirection and shell
+  writes for the verifier role; the denial reason is set before the effect loop
+  and the loop stops on Deny. Five tests including
+  `a_verifier_cannot_stage_the_change_it_judges`.
+- **D3.1 grant breach escalated, not noted** — the outside-grant board entry is
+  `Escalation` instead of `Note`; the commit is kept and the verifier still rules
+  on it, which the verifier brief already frames as fail-or-escalate.
+- **D3.2 handoff refused when the branch delivered nothing** —
+  `worktree::delivered_nothing` (`untouched(granted, changed).len() ==
+  granted.len()`), checked at handoff before a verifier is given the branch. The
+  work and the branch are kept; the task goes back through
+  `schedule::apply_verdict` with a refusal naming the missing paths, so the
+  attempt ceiling is the same one a refused verdict answers to. Tests:
+  `a_branch_that_touched_none_of_the_grant_delivered_nothing`,
+  `a_branch_that_touched_one_granted_file_is_judged_not_refused`,
+  `a_task_with_no_grant_is_never_refused_for_delivering_nothing`.
+- **D3.3 `base_dirtied` read before the reset** — `base_checkout_for` captures
+  `is_dirty` before `ensure_detached` wipes it; the post-proof read is kept as the
+  second window. Real-repository test
+  `a_base_the_verifier_left_dirty_is_reported_before_the_reset_hides_it`.
 
-Verification: `cargo test --lib swarm::engine` → 157 passed, 0 failed, 6 ignored
-(the ignored ones need a real `vibe-acp` on PATH); `cargo test --lib
-swarm::integrate` → 13 passed.
+Verification: `cargo test --lib swarm::` → **646 passed, 0 failed, 6 ignored,
+4.18s**; `cargo check --all-targets` clean. Commit `b9d14c0`.
 
-Not yet started: D2.2 identity, D2.3 command classification, D3, D5, D4, D6, D7.
+Not yet started: D5 (money budget), D4 (clock attribution), D6 (reap by run id),
+D7 (per-task progress).
 
 
 ---

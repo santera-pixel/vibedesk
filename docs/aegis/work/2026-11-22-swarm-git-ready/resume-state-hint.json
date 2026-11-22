@@ -2,7 +2,7 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-11-22-swarm-git-ready",
   "lastCheckpointRef": "docs/aegis/work/2026-11-22-swarm-git-ready/todo-checkpoint-draft.json",
-  "resumeInstruction": "Verify git log shows 6dbd001 on origin/main; do not touch D:\\VibeDesk\\data\\capabilities.json or the LivingMiniture files",
+  "resumeInstruction": "Release v0.1.0 assets verified: downloaded vibedesk.exe sha256 84091968... matches checksums.txt and contains the git-ready swarm code",
   "knownPartialWork": [],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-11-22-swarm-git-ready/10-intent.md",

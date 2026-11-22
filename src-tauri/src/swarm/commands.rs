@@ -49,6 +49,10 @@ pub struct Command {
     pub concurrency: Option<usize>,
     #[serde(default)]
     pub budget_tokens: Option<u64>,
+    /// The ceiling in money, in millionths of a dollar. Absent means the token
+    /// ceiling is the only bound; the spend is reported either way.
+    #[serde(default)]
+    pub budget_micros: Option<u64>,
     /// The model the lead and the workers run on.
     ///
     /// Empty means the workspace's active model, which is the right default and

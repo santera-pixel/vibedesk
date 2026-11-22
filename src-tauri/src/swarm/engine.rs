@@ -695,6 +695,7 @@ impl Engine {
         workspace: PathBuf,
         models: RoleModels,
         budget_tokens: u64,
+        budget_micros: Option<u64>,
         concurrency: usize,
     ) -> Result<Run, String> {
         {
@@ -726,6 +727,9 @@ impl Engine {
 
         let mut run = Run::new(goal.clone(), workspace.to_string_lossy().to_string(), lead);
         run.budget.max_tokens = budget_tokens;
+        // The ceiling in money, when the caller set one. Reported spend is
+        // always computed; this only decides whether the run stops on it.
+        run.budget.max_spend_micros = budget_micros.filter(|micros| *micros > 0);
         run.budget.started_at = Some(now());
         run.concurrency = concurrency.max(1);
 
@@ -5634,11 +5638,22 @@ async fn drive_loop(sink: Arc<dyn EventSink>, run_id: String, cancel: Arc<Atomic
                     // fraction of fresh input. The ceiling counts the billable
                     // tokens, so the message reports the same number the check
                     // used and keeps the traffic figure beside it.
-                    let spent = next.budget.spent_tokens();
+                    let spent = next.budget.spent_tokens;
                     let used = next.budget.used_tokens;
                     let cached = next.budget.cached_tokens;
+                    // The money figure rides along when the models are priced: it
+                    // is the number that says whether the run was expensive, and a
+                    // token count cannot.
+                    let money = match next.budget.spend_micros {
+                        Some(micros) => format!(
+                            ", ${:.4} at rates v{}",
+                            micros as f64 / 1_000_000.0,
+                            next.budget.rates_version
+                        ),
+                        None => ", spend unpriced".to_string(),
+                    };
                     format!(
-                        "budget exceeded: {spent} tokens of a {} ceiling ({used} crossed the wire, {cached} of them cache reads)",
+                        "budget exceeded: {spent} tokens of a {} ceiling ({used} crossed the wire, {cached} of them cache reads{money})",
                         next.budget.max_tokens
                     )
                 } else {

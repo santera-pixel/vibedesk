@@ -213,6 +213,7 @@ fn start(arguments: &Value) -> Result<Value, String> {
         .trim()
         .to_string();
     command.budget_tokens = arguments.get("budgetTokens").and_then(Value::as_u64);
+    command.budget_micros = arguments.get("budgetMicros").and_then(Value::as_u64);
 
     ask(&command)
 }
@@ -310,6 +311,14 @@ fn describe(run: &Run) -> Value {
         "budget": {
             "usedTokens": run.budget.used_tokens,
             "maxTokens": run.budget.max_tokens,
+            "cachedTokens": run.budget.cached_tokens,
+            "spentTokens": run.budget.spent_tokens,
+            "spendMicros": run.budget.spend_micros,
+            "maxSpendMicros": run.budget.max_spend_micros,
+            "spendPct": run.budget.spend_pct,
+            "hitRate": run.budget.hit_rate,
+            "unpricedModels": run.budget.unpriced_models,
+            "ratesVersion": run.budget.rates_version,
         },
         "integration": {
             "state": run.integration.state,

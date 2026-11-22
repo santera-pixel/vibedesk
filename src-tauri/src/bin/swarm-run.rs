@@ -56,10 +56,11 @@ fn arg(name: &str) -> Option<String> {
 ///
 /// A flag it does not know is a typo, and a typo that is ignored is a run that
 /// spends real tokens on a goal nobody asked for.
-const FLAGS: [&str; 11] = [
+const FLAGS: [&str; 12] = [
     "--workspace",
     "--goal",
     "--budget",
+    "--budget-micros",
     "--concurrency",
     "--timeout",
     "--models",
@@ -76,6 +77,9 @@ swarm-run — run a swarm headlessly
   --workspace <dir>         the repository the run works in (default: the current directory)
   --goal <text>             what the run must produce (required)
   --budget <tokens>         the token budget for the whole run (default: 4000000)
+  --budget-micros <usd>     the money ceiling, in millionths of a dollar — the
+                            run stops on either ceiling; spend is reported
+                            either way (default: none)
   --concurrency <n>         how many tasks run at once (default: 4)
   --timeout <seconds>       how long the run may take (default: 1800)
   --model <alias>           the workspace's active model
@@ -118,6 +122,7 @@ async fn main() {
     let budget: u64 = arg("--budget")
         .and_then(|v| v.parse().ok())
         .unwrap_or(4_000_000);
+    let budget_micros: Option<u64> = arg("--budget-micros").and_then(|v| v.parse().ok());
     let concurrency: usize = arg("--concurrency")
         .and_then(|v| v.parse().ok())
         .unwrap_or(4);
@@ -237,7 +242,15 @@ async fn main() {
 
     println!("\nplanning…");
     if let Err(error) = engine
-        .start(sink.clone(), goal, workspace.clone(), models.clone(), budget, concurrency)
+        .start(
+            sink.clone(),
+            goal,
+            workspace.clone(),
+            models.clone(),
+            budget,
+            budget_micros,
+            concurrency,
+        )
         .await
     {
         eprintln!("could not start: {error}");

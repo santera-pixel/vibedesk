@@ -35,6 +35,7 @@ pub mod integrate;
 pub mod permissions;
 pub mod plan;
 pub mod prove;
+pub mod rates;
 pub mod reflect;
 pub mod roles;
 pub mod schedule;
@@ -1115,6 +1116,43 @@ pub struct Budget {
     /// Input tokens served from cache across the whole run.
     #[serde(default)]
     pub cached_tokens: u64,
+    /// Uncached input plus output, which is what a ceiling should count.
+    ///
+    /// Computed by [`Run::recompute_spend`] and carried here so no reader has to
+    /// subtract by hand. The audited run was read as "56M against a 25M cap"
+    /// because the payload offered only the traffic figure — 94.7% of which was
+    /// cache reads — and the reader had nothing to subtract.
+    #[serde(default)]
+    pub spent_tokens: u64,
+    /// What this run has cost, in millionths of a dollar, priced at
+    /// [`rates::RATES`].
+    ///
+    /// `None` when any member's model is missing from the table: a run that cannot
+    /// be priced must not report a number, because zero reads as free and a partial
+    /// sum reads as the bill. The models that stopped it being answered are named
+    /// in `unpriced_models`.
+    #[serde(default)]
+    pub spend_micros: Option<u64>,
+    /// The ceiling in money, when the caller set one. Zero or absent means the
+    /// token ceiling is the only one.
+    #[serde(default)]
+    pub max_spend_micros: Option<u64>,
+    /// The percentage of the ceiling that has been spent.
+    ///
+    /// Reported so a run cannot be misread again: a percentage of the cap is the
+    /// number that answers "is this run in trouble", and it was the one number the
+    /// payload did not carry.
+    #[serde(default)]
+    pub spend_pct: f64,
+    /// The share of input tokens the provider served from its cache, 0..1.
+    #[serde(default)]
+    pub hit_rate: f64,
+    /// The models this run used that [`rates::RATES`] cannot price.
+    #[serde(default)]
+    pub unpriced_models: Vec<String>,
+    /// The rates version the spend was computed with.
+    #[serde(default)]
+    pub rates_version: u32,
     pub max_wall_secs: u64,
     pub started_at: Option<String>,
 }
@@ -1125,35 +1163,47 @@ impl Default for Budget {
             max_tokens: 2_000_000,
             used_tokens: 0,
             cached_tokens: 0,
+            spent_tokens: 0,
+            spend_micros: None,
+            max_spend_micros: None,
+            spend_pct: 0.0,
+            hit_rate: 0.0,
+            unpriced_models: Vec::new(),
+            rates_version: rates::RATES_VERSION,
             max_wall_secs: 60 * 60,
             started_at: None,
         }
     }
 }
 
-impl Budget {
-    /// The tokens this run has actually been billed for.
-    ///
-    /// `used_tokens` is every token that crossed the wire, and most of them are
-    /// cache reads: a member re-sends its whole context on every turn, so a run
-    /// that has done almost nothing can still show millions. Counting those
-    /// against the ceiling killed a live run at 4.4M tokens of which 96% were
-    /// cached — five cents of work, reported as a blown budget.
-    ///
-    /// A cache read is a token the provider did not have to compute, and the
-    /// ceiling exists to bound what the run costs. So the ceiling counts the
-    /// uncached input plus the output, and `used_tokens` stays as the traffic
-    /// figure the panel shows.
-    pub fn spent_tokens(&self) -> u64 {
-        self.used_tokens.saturating_sub(self.cached_tokens)
-    }
+/// Uncached input plus output: the tokens a ceiling should count.
+///
+/// `used_tokens` is every token that crossed the wire, and most of them are cache
+/// reads — a member re-sends its whole context every turn — so counting traffic
+/// against a ceiling reported a five-cent run as a blown budget.
+pub fn billed_tokens(used: u64, cached: u64) -> u64 {
+    used.saturating_sub(cached)
+}
 
+impl Budget {
     /// Whether the run has spent its allowance.
     ///
     /// A budget that counts only workers is a budget that lies, so `used_tokens`
     /// is the sum over every member including the lead and the reflection pass.
+    ///
+    /// Two ceilings, because they answer different questions. The token ceiling is
+    /// a proxy that costs nothing to check; the money ceiling is the real one and
+    /// only applies when the caller set it and the models are priced. A run whose
+    /// models cannot be priced is not "free" — it is unbounded in money, which is
+    /// why `unpriced_models` is reported rather than defaulted.
     pub fn exceeded(&self) -> bool {
-        self.max_tokens > 0 && self.spent_tokens() >= self.max_tokens
+        if self.max_tokens > 0 && self.spent_tokens >= self.max_tokens {
+            return true;
+        }
+        match (self.max_spend_micros, self.spend_micros) {
+            (Some(ceiling), Some(spent)) => ceiling > 0 && spent >= ceiling,
+            _ => false,
+        }
     }
 
     /// Seconds since the run started, or zero before it has.
@@ -1486,9 +1536,62 @@ impl Run {
     /// Derived rather than accumulated: a member that is cancelled mid-turn
     /// must not leave its spend uncounted, and a single source of truth cannot
     /// drift from the roster the panel shows.
+    ///
+    /// Everything a reader needs is computed here, because the payload that
+    /// carried only `usedTokens` and `maxTokens` is how a run at 17.9% of its
+    /// ceiling was read as a blowout. Traffic, the billed part of it, what that
+    /// part cost, the share the cache served, and the percentage of whichever
+    /// ceiling actually bounds the run.
     pub fn recompute_spend(&mut self) {
         self.budget.used_tokens = self.roster().map(Member::tokens).sum();
         self.budget.cached_tokens = self.roster().map(|m| m.cached_tokens).sum();
+        self.budget.spent_tokens =
+            billed_tokens(self.budget.used_tokens, self.budget.cached_tokens);
+        self.budget.hit_rate = if self.budget.used_tokens > 0 {
+            self.budget.cached_tokens as f64 / self.budget.used_tokens as f64
+        } else {
+            0.0
+        };
+
+        // Priced per member: the lead and the workers can be on different models,
+        // and one rate for the run would be a guess about which.
+        let members: Vec<(String, u64, u64, u64)> = self
+            .roster()
+            .map(|m| (m.model.clone(), m.tokens_in, m.cached_tokens, m.tokens_out))
+            .collect();
+        let mut micros: u64 = 0;
+        let mut priced = 0usize;
+        let mut unpriced: Vec<String> = Vec::new();
+        for (model, input, cached, output) in members {
+            match rates::price(&model, input, cached, output) {
+                Some(cost) => {
+                    micros = micros.saturating_add(cost);
+                    priced += 1;
+                }
+                None => {
+                    let model = model.trim().to_string();
+                    if !model.is_empty() && !unpriced.contains(&model) {
+                        unpriced.push(model);
+                    }
+                }
+            }
+        }
+        self.budget.unpriced_models = unpriced.clone();
+        // `None`, not zero, and `None` whenever any member could not be priced:
+        // a partial sum is a floor, and a floor presented as "the spend" is the
+        // same lie as zero. The models that stopped it being answered are named,
+        // so the fix is a row in `rates::RATES` rather than a guess.
+        self.budget.spend_micros = (priced > 0 && unpriced.is_empty()).then_some(micros);
+        self.budget.rates_version = rates::RATES_VERSION;
+        self.budget.spend_pct = match (self.budget.max_spend_micros, self.budget.spend_micros) {
+            (Some(ceiling), Some(spent)) if ceiling > 0 => spent as f64 / ceiling as f64 * 100.0,
+            // No money ceiling set, so the token ceiling is the only bound there
+            // is — and the percentage is against that, in tokens.
+            _ if self.budget.max_tokens > 0 => {
+                self.budget.spent_tokens as f64 / self.budget.max_tokens as f64 * 100.0
+            }
+            _ => 0.0,
+        };
     }
 
     /// The whole run's usage, every member summed.
@@ -1642,7 +1745,13 @@ pub fn load_at(dir: &Path) -> Result<Run, String> {
     let path = dir.join("run.json");
     let body = std::fs::read_to_string(&path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    serde_json::from_str(&body).map_err(|error| format!("{} is not a run: {error}", path.display()))
+    let mut run: Run = serde_json::from_str(&body)
+        .map_err(|error| format!("{} is not a run: {error}", path.display()))?;
+    // The derived figures are recomputed on load. A run written before the spend
+    // fields existed carries zeros for them, and a zero spend reads as a free run
+    // — which is the mistake the whole money plane exists to stop making.
+    run.recompute_spend();
+    Ok(run)
 }
 
 /// One run, by id, or nothing when the id names no run.
@@ -1742,7 +1851,14 @@ pub struct RunSummary {
     pub created_at: String,
     pub tasks: usize,
     pub verified: usize,
+    /// Every token that crossed the wire, cache reads included.
     pub tokens: u64,
+    /// The part of `tokens` the provider served from cache.
+    pub cached_tokens: u64,
+    /// The part of `tokens` the run was billed for.
+    pub spent_tokens: u64,
+    /// What that cost in µusd, and absent when a model in the run is unpriced.
+    pub spend_micros: Option<u64>,
     pub rehearsal: bool,
 }
 
@@ -1756,6 +1872,9 @@ impl From<&Run> for RunSummary {
             tasks: run.tasks.len(),
             verified: run.tasks.iter().filter(|t| t.state.is_verified()).count(),
             tokens: run.budget.used_tokens,
+            cached_tokens: run.budget.cached_tokens,
+            spent_tokens: run.budget.spent_tokens,
+            spend_micros: run.budget.spend_micros,
             rehearsal: run.rehearsal,
         }
     }
@@ -1951,6 +2070,45 @@ mod tests {
         assert_eq!(run.usage().input, 150);
     }
 
+    /// The payload carries the spend, the share the cache served, and the models
+    /// it could not price — all three, because a reader given only `usedTokens`
+    /// read 56M of traffic against a 25M ceiling and called 17.9% of a cap a
+    /// blowout.
+    #[test]
+    fn a_recomputed_run_reports_what_it_spent_and_what_it_could_not_price() {
+        let mut run = Run::new("goal", "D:/ws", Member::new("lead", Role::Lead, "mistral-large"));
+        let mut worker = Member::new("w-t1", Role::Worker, "mistral-large");
+        worker.tokens_in = 1_000_000;
+        worker.cached_tokens = 900_000;
+        worker.tokens_out = 10_000;
+        run.members.push(worker);
+        run.lead.tokens_in = 500_000;
+        run.lead.tokens_out = 5_000;
+        run.recompute_spend();
+
+        // 1.5M in, 0.9M of it cached, 15k out
+        assert_eq!(run.budget.used_tokens, 1_515_000);
+        assert_eq!(run.budget.cached_tokens, 900_000);
+        assert_eq!(run.budget.spent_tokens, 615_000);
+        assert!((run.budget.hit_rate - 900_000.0 / 1_515_000.0).abs() < 1e-9);
+        // 600k fresh at $2/M + 900k cached at $0.20/M + 15k out at $6/M
+        // = 1,200,000 + 180,000 + 90,000 µusd
+        assert_eq!(run.budget.spend_micros, Some(1_470_000));
+        assert!(run.budget.unpriced_models.is_empty());
+        assert_eq!(run.budget.rates_version, rates::RATES_VERSION);
+        // No money ceiling set, so the percentage is against the token ceiling.
+        assert!((run.budget.spend_pct - 615_000.0 / 2_000_000.0 * 100.0).abs() < 1e-9);
+
+        // A member on a model this table does not price makes the money absent
+        // rather than zero, and names the model.
+        let mut local = Member::new("w-t2", Role::Worker, "some-local-gguf");
+        local.tokens_in = 1_000;
+        run.members.push(local);
+        run.recompute_spend();
+        assert_eq!(run.budget.spend_micros, None);
+        assert_eq!(run.budget.unpriced_models, vec!["some-local-gguf".to_string()]);
+    }
+
     #[test]
     fn a_run_that_has_stopped_reports_a_frozen_elapsed_time() {
         let mut run = Run::new("goal", "D:/ws", lead());
@@ -2038,9 +2196,11 @@ mod tests {
             ..Default::default()
         };
         budget.used_tokens = 99;
+        budget.spent_tokens = 99;
         assert!(!budget.exceeded());
         budget.used_tokens = 100;
-        assert!(budget.exceeded());
+        budget.spent_tokens = 100;
+        assert!(budget.exceeded(), "the ceiling is inclusive");
     }
 
     /// A run that is mostly cache reads is cheap, and the ceiling must say so.
@@ -2055,9 +2215,10 @@ mod tests {
             max_tokens: 4_000_000,
             used_tokens: 4_406_635,
             cached_tokens: 4_230_370,
+            spent_tokens: billed_tokens(4_406_635, 4_230_370),
             ..Default::default()
         };
-        assert_eq!(budget.spent_tokens(), 176_265);
+        assert_eq!(budget.spent_tokens, 176_265);
         assert!(
             !budget.exceeded(),
             "176k billable tokens is not a blown 4M ceiling"
@@ -2071,6 +2232,7 @@ mod tests {
             max_tokens: 100,
             used_tokens: 100,
             cached_tokens: 0,
+            spent_tokens: 100,
             ..Default::default()
         };
         assert!(budget.exceeded());
@@ -2086,10 +2248,39 @@ mod tests {
             max_tokens: 100,
             used_tokens: 10,
             cached_tokens: 50,
+            spent_tokens: billed_tokens(10, 50),
             ..Default::default()
         };
-        assert_eq!(budget.spent_tokens(), 0);
+        assert_eq!(budget.spent_tokens, 0);
         assert!(!budget.exceeded());
+    }
+
+    /// A money ceiling is checked when the models are priced, and a run this
+    /// build cannot price is unbounded in money rather than free.
+    ///
+    /// `spend_micros` is `None` for an unpriced model on purpose: the fallback
+    /// rate was the alternative, and a guessed price is worse than a missing one
+    /// because it looks answered.
+    #[test]
+    fn a_money_ceiling_is_checked_only_for_a_priced_run() {
+        let priced = Budget {
+            max_tokens: 0,
+            max_spend_micros: Some(1_000_000),
+            spend_micros: Some(1_200_000),
+            ..Default::default()
+        };
+        assert!(priced.exceeded(), "$1.20 spent against a $1.00 ceiling");
+
+        let unpriced = Budget {
+            max_tokens: 0,
+            max_spend_micros: Some(1_000_000),
+            spend_micros: None,
+            ..Default::default()
+        };
+        assert!(
+            !unpriced.exceeded(),
+            "an unpriced run is unbounded, not free — it stops on the token ceiling"
+        );
     }
 
     #[test]

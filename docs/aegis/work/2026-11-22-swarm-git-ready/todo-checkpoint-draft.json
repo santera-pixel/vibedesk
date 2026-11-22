@@ -1,11 +1,11 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-11-22-swarm-git-ready",
-  "currentTodo": "git-ready swarm precondition implemented, tested, pushed",
+  "currentTodo": "release v0.1.0 assets rebuilt from main and re-uploaded",
   "completedTodos": [],
-  "activeSlice": "swarm start gates auto git-init the workspace",
+  "activeSlice": "tauri release build + gh release upload --clobber",
   "evidenceRefs": [],
   "blockedOn": null,
-  "nextStep": "release binaries predate this change; rebuild + re-upload only if asked",
+  "nextStep": "none; SmartScreen warning remains until binaries are code-signed (SignPath or paid cert)",
   "updatedAt": "2026-11-22"
 }

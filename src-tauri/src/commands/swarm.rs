@@ -80,6 +80,7 @@ pub async fn swarm_start(
     goal: String,
     concurrency: Option<usize>,
     budget_tokens: Option<u64>,
+    budget_micros: Option<u64>,
     catalog: Option<Catalog>,
     crew: Option<CrewChoice>,
 ) -> AppResult<Run> {
@@ -122,6 +123,7 @@ pub async fn swarm_start(
             cwd,
             models,
             budget,
+            budget_micros,
             concurrency.unwrap_or(4),
         )
         .await
@@ -424,6 +426,7 @@ async fn answer(app: &tauri::AppHandle, command: crate::swarm::commands::Command
                     cwd,
                     models,
                     command.budget_tokens.unwrap_or(DEFAULT_BUDGET_TOKENS),
+                    command.budget_micros,
                     command.concurrency.unwrap_or(4),
                 )
                 .await
