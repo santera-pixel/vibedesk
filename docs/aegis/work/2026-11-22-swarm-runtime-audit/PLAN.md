@@ -268,68 +268,83 @@ a per-task deadline is `stalled`.
 
 ## 5a. Implementation status
 
-Landed and verified in this pass (plan order):
+Every fault in §2 now has code, tests and a commit. The order below is the order
+the work landed in.
 
-- **D2.1 merge the judged SHA** — `Task.verified_commit` pinned at handoff
-  (engine.rs handoff block), asserted unchanged when the verdict arrives (a moved
-  branch refuses the verdict and says which commits), and merged in place of the
-  branch tip (integrate.rs). Regression test
-  `integration_merges_the_commit_the_verdict_was_earned_on` passes.
-- **D1 one restart authority** — `charge_restart` is now the only place
-  `respawns` moves; `after_turn_error` and `respawn_dead` both go through it, and
-  `Starting` makes it idempotent so one death spends one slot. `respawn_dead`
-  persists after charging. Regression test `one_death_charges_one_restart` passes.
-- **D2.2 member identity** — `worktree::identity` / `set_identity`, applied by
-  `add_worktree` from the checkout's directory name, so every worktree commits as
-  `swarm-<member>` / `<member>@swarm.local`. `worktree::authors` reads author
-  emails over `base..tip`; `integrate` refuses a branch carrying an author that
-  is not that task's worker. Tests:
-  `a_commit_the_worker_did_not_author_is_refused`,
-  `the_workers_own_commits_integrate`, and the add-worktree test now asserts the
-  two identity calls.
-- **D2.3 verifier cannot author** — `permissions::authorship` refuses `git add`,
-  `git commit`, `git checkout -b`, `git stash`, shell redirection and shell
-  writes for the verifier role; the denial reason is set before the effect loop
-  and the loop stops on Deny. Five tests including
-  `a_verifier_cannot_stage_the_change_it_judges`.
-- **D3.1 grant breach escalated, not noted** — the outside-grant board entry is
-  `Escalation` instead of `Note`; the commit is kept and the verifier still rules
-  on it, which the verifier brief already frames as fail-or-escalate.
-- **D3.2 handoff refused when the branch delivered nothing** —
-  `worktree::delivered_nothing` (`untouched(granted, changed).len() ==
-  granted.len()`), checked at handoff before a verifier is given the branch. The
-  work and the branch are kept; the task goes back through
-  `schedule::apply_verdict` with a refusal naming the missing paths, so the
-  attempt ceiling is the same one a refused verdict answers to. Tests:
-  `a_branch_that_touched_none_of_the_grant_delivered_nothing`,
-  `a_branch_that_touched_one_granted_file_is_judged_not_refused`,
-  `a_task_with_no_grant_is_never_refused_for_delivering_nothing`.
-- **D3.3 `base_dirtied` read before the reset** — `base_checkout_for` captures
-  `is_dirty` before `ensure_detached` wipes it; the post-proof read is kept as the
-  second window. Real-repository test
-  `a_base_the_verifier_left_dirty_is_reported_before_the_reset_hides_it`.
+| Fault | What it was | Commit | What proves it |
+|---|---|---|---|
+| 1 verifier authored the artifact | v-t2 wrote t2's files and repointed the branch | `b9d14c0` | `permissions::authorship` refuses `git add`/`commit`/`checkout -b`/`stash`/redirects for the verifier; `integrate` refuses a branch carrying a foreign author; `Task.verified_commit` (`c1136df`) is merged instead of the branch tip |
+| 2 grant breach noted, not acted on | w-t2's two out-of-grant files stayed on the branch | `b9d14c0` | the board entry is an `Escalation`, and `delivered_nothing` refuses a handoff that touched none of its grant |
+| 3 three liveness clocks, one path | restarts at 180 s, 600 s and process death were one event in the log | `c1136df`, `4063850`, `1037151` | one charging authority; silence measured and named; `RestartCause::{Infra,Timeout,Provider}` with separate counters; `MAX_INFRA_RESTARTS = 3` stops the run |
+| 4 estimates 13× low | 60 000-token constants against 39 M observed | `d630c4c`, `85c1b19` | `Estimates::of(history)` from `role_medians`, and the median reads **fresh** tokens, so the plan is not derived from a 94.7% cache hit |
+| 5 workers saw a truncated board | 12 entries / 2400 chars dropped the escalation | `6902979` | the task's own record and every escalation/conflict/verdict are pinned untruncated; only cross-task chatter is capped |
+| 6 stop left worktrees locked | 4 worktrees and 4 branches survived a cancel | `9529abf` | `delete` stops bridges → removes checkouts → deletes branches → removes the directory, and reports `cleanupProblems`; `SwarmPanel` calls it through `swarm_delete` |
+| 7 budget presented as usedTokens | 56 M read as spend when 51.5 M was cache | `65b9ef1` | `price()` in µusd over a versioned rate table, `spendMicros`/`spendPct`/`hitRate`/`unpricedModels` in the payload, `exceeded()` on money |
+| 8 working was not progress | five worktrees held README.md and .git | `476673c` | `filesChanged`, `commits`, `lastCommitAt`, `stalled` per task, with `stalled_secs` a pure rule |
 
-Verification: `cargo test --lib swarm::` → **646 passed, 0 failed, 6 ignored,
-4.18s**; `cargo check --all-targets` clean. Commit `b9d14c0`.
+Two findings the audit did not have, both from running the end-to-end suite
+(`3eaab01`):
 
-Not yet started: D5 (money budget), D4 (clock attribution), D6 (reap by run id),
-D7 (per-task progress).
+- **Member identity was never per-worktree.** `set_identity` used plain
+  `git config`, which in a linked worktree edits the *shared* `.git/config`, so
+  the last member to spawn owned every commit. The gate refused a t1 branch
+  authored by `w-t2@swarm.local` — correctly — and the run failed at integration.
+  Fixed with `extensions.worktreeConfig` + `git config --worktree`.
+- **The end-to-end suite had never run.** `swarm-sim` offered only the `auto`
+  mode, and the engine refuses a role mode the session does not offer, so all six
+  tests died at the first spawn. A suite that fails before the drive loop is not
+  a suite.
 
+Correction to §2's fault 5 as written: `skills.rs:168`'s 2400-char cap is the
+*ranking* body, not the brief. A `Skill`'s body is stripped from the serialized
+catalogue (`skills.rs:1113`), so nothing truncates an instruction a member
+receives. The board digest was the only real truncation, and it is fixed.
+
+### Verification actually run
+
+| Command | Result |
+|---|---|
+| `cargo test --lib -- swarm::` | 664 passed, 0 failed, 6 ignored, 4.59 s |
+| `cargo test --lib` | 1537 passed, 0 failed, 10 ignored, 6.34 s |
+| `cargo test --test swarm_e2e` | 6 passed, 0 failed, 50.86 s (was 0 passed, 6 failed at spawn) |
+| `cargo check --all-targets` | clean |
+
+### Still not done
+
+- **The rehearsal run has not happened.** The plan authorises one small run (2–3
+  tasks) to measure `spendMicros`, timing and `unpricedModels` against the money
+  ledger. Nothing in this table is a substitute for it: the unit tests exercise
+  helpers and the end-to-end suite drives a scripted agent, so no model call has
+  been made or billed by any of this.
+- **`RATES` is a table, not a bill.** The numbers are the published per-model
+  rates at the version in `rates_version`; a run on a model the table does not
+  know reports itself as unpriced rather than guessing (verified by
+  `an_unknown_model_is_unpriced_rather_than_free`), but a provider that changes its prices makes
+  the ledger wrong until the table is updated.
+- **Cache-write tokens are not counted.** `Usage` tracks reads and totals, not
+  writes, so a provider that bills writes reports a floor. Documented in
+  `rates::price`, not fixed.
 
 ---
 
 ## 6. Not proven
 
-- Cost multipliers are a model; `run.json` has tokens, not rates. The 57.4% needs
-  the provider's per-model rates to become a number rather than a ratio.
-- The 1004 s figure is an upper bound on silence, not `last_at` delta; the log
-  cannot produce the real value until D4.1 lands.
-- **I have not run the swarm or its test suite.** Every claim here is a reading of
-  run artifacts and source. The D1 and D2 tests described are assertions about
-  code as written, not executed results.
-- Why `busy` held for ~16 minutes before the first nudge is still unexplained:
-  the pulse is not logged in the run directory. D4.3 names one mechanism;
-  confirming it needs the turn-clock instrumentation first.
+- No live run has been made since these changes. Every result above is a test
+  executable's own output, run on this machine today; a real run adds the model,
+  the provider and the wall clock, and could still fail in ways no scripted agent
+  shows.
+- The throughput claim (fewer restarts, less re-reading) is a mechanism, not a
+  measurement: `MAX_INFRA_RESTARTS` and the cause split make a dead process
+  distinguishable from a slow one, but the improvement in verified-artifacts-per-
+  hour is unmeasured until the rehearsal.
+- `MAX_INFRA_RESTARTS = 3` is a judgement, not a derived figure. Three covers a
+  one-off crash of a shared process; a run that trips it on a machine where the
+  agent legitimately restarts more often would need the number raised, and that
+  would be evidence the threshold was wrong rather than evidence the rule is.
+- `STALL_SECS = 1200` is likewise chosen: twenty minutes of no commits. A worker
+  legitimately reading a large codebase before its first commit will be reported
+  as stalled once. It is a report, not a kill, which is why the number can be
+  generous.
 
 ## 7. Research basis
 
