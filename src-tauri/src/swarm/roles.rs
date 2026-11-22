@@ -256,34 +256,20 @@ pub fn assign(
 
 /// The agent a role runs as.
 ///
-/// `vibe-acp` advertises its agents as session modes on `session/new`, and
-/// `session/set_config_option {configId: "mode"}` selects one. The four built-in
-/// modes are `ask`, `accept-edits`, `smart-approve` and `auto-approve`; a custom
-/// agent in `~/.vibe/agents/NAME.toml` is advertised beside them under its file
-/// stem. Verified against `vibe-acp` 3.1.2: a probe agent appeared in
-/// `availableModes` and the set was accepted.
+/// These four names are the payload `provision` writes to
+/// `~/.vibe/agents/NAME.toml`, and they are what the engine selects on the
+/// session before the first turn. Selecting them is what makes the payload
+/// matter: without it the member keeps the session default, which is Vibe's
+/// coding prompt, and the lead implements the goal instead of planning it.
 ///
-/// These four names are the payload `provision` writes. Selecting them is what
-/// makes the payload matter: without it the lead runs on Vibe's own coding
-/// prompt, which says "if the task requires an edit, edit", and the lead
-/// implements the goal instead of planning it. `provision::swarm_ready` is the
-/// precondition that refuses a run when they are missing, because a mode the
-/// session does not offer is silently ignored and the member keeps the default.
-///
-/// ## Why not `smart-approve`
-///
-/// The permission gate is derived from the agent's *name*, not its `safety`
-/// field: `_runtime.py` sets `ToolGate.CLASSIFIER` only when
-/// `active_profile.name == "smart-approve"`. A custom agent therefore cannot
-/// inherit the classifier, and `safety = "smart"` does not grant it.
-///
-/// That is not a loss. A member's permission requests are answered by
-/// [`super::permissions::Gate`], which decides from the role and the effects the
-/// agent declared — it denies destructive commands, denies a verifier or
-/// reflector any write, and allows a worker its own worktree. That is stricter
-/// than the classifier and deterministic, and it costs no extra model call per
-/// tool, which is the latency the classifier added to every member turn.
-pub fn mode_for(role: super::Role) -> &'static str {
+/// Where the name lives on the session depends on the agent version. `vibe-acp`
+/// 3.1.2 advertised a custom agent in `availableModes` beside the permission
+/// modes; 3.1.4 splits them — `mode` is `ask`, `accept-edits`, `auto-approve`,
+/// and the agent is a separate `agent` option that lists these four. Probed
+/// against the installed 3.1.4: `session/new` returns an `agent` option whose
+/// values are exactly the four below. The engine asks the session which option
+/// carries it rather than assuming, so both versions run.
+pub fn agent_for(role: super::Role) -> &'static str {
     match role {
         super::Role::Lead => "vibedesk-swarm-lead",
         super::Role::Worker => "vibedesk-swarm-worker",

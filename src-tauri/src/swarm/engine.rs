@@ -782,7 +782,7 @@ impl Engine {
             &workspace,
             &models.lead,
             Some(models.thinking.lead.as_str()),
-            Some(roles::mode_for(Role::Lead)),
+            Some(roles::agent_for(Role::Lead)),
             Vec::new(),
             None,
         )
@@ -795,7 +795,7 @@ impl Engine {
                     session_id,
                     pid,
                     thinking,
-                    mode,
+                    agent,
                     watch,
                     ..
                 } = spawned;
@@ -825,7 +825,7 @@ impl Engine {
                         run.lead.session_id = Some(session_id.clone());
                         run.lead.pid = pid;
                         run.lead.thinking = thinking.clone();
-                        run.lead.mode = mode.clone();
+                        run.lead.agent = agent.clone();
                         run.lead.state = MemberState::Working;
                         run.lead.last_at = Some(now());
                         run.touch();
@@ -1613,7 +1613,7 @@ pub struct Spawned {
     /// The reasoning level the session reports it is on.
     pub thinking: Option<String>,
     /// The mode the session reports it is in.
-    pub mode: Option<String>,
+    pub agent: Option<String>,
     /// The skills this member's own tool calls loaded, live.
     ///
     /// Held rather than copied because the drive loop reads it while the member
@@ -1635,6 +1635,33 @@ fn config_value(session: &Value, id: &str) -> Option<String> {
         .and_then(|option| option.get("currentValue"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// Which config option carries the agent on this session.
+///
+/// `vibe-acp` 3.1.4 lists agents on an `agent` option and keeps `mode` for
+/// permissions; 3.1.2 listed them as modes. Whichever offers this value is the
+/// one to set, with `agent` preferred when both do — the newer layout, and the
+/// one the installed version uses. `None` means neither, which is an error the
+/// caller raises with both lists in it rather than a member left on the session
+/// default.
+fn agent_option(session: &Value, agent: &str) -> Option<&'static str> {
+    if config_offers(session, "agent", agent) {
+        return Some("agent");
+    }
+    if config_offers(session, "mode", agent) {
+        return Some("mode");
+    }
+    None
+}
+
+/// A list for an error message, which has to say "nothing" rather than "".
+fn listed(values: &[String]) -> String {
+    if values.is_empty() {
+        "nothing".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 /// Whether a session offers a value for one config option.
@@ -1698,7 +1725,7 @@ async fn spawn_member(
     cwd: &Path,
     model: &str,
     thinking: Option<&str>,
-    mode: Option<&str>,
+    agent: Option<&str>,
     readable: Vec<PathBuf>,
     ledger: Option<Arc<std::sync::Mutex<super::Usage>>>,
 ) -> Result<Spawned, String> {
@@ -1808,47 +1835,48 @@ async fn spawn_member(
         }
     }
 
-    // The mode, checked against what the session offers. `vibe-acp` rejects an
-    // unknown value outright, so a blind set would leave the member in whatever
-    // mode the session defaulted to and the roster would be wrong about it.
+    // The agent, checked against what the session offers. `vibe-acp` rejects an
+    // unknown value outright, so a blind set would leave the member on whatever
+    // agent the session defaulted to and the roster would be wrong about it.
     //
-    // A swarm role's mode is its own agent, and a mode the session does not
-    // offer is the failure this whole path exists to prevent: the member keeps
-    // the session default, which is Vibe's coding prompt, and the lead
-    // implements the goal instead of planning it. The precondition in
-    // `preconditions_with` refuses a run before this point, but a precondition
-    // is a check and a check can be raced — the agent file can be deleted
-    // between the panel reading it and the spawn. So a missing mode is an error
-    // here, not a silent fallback.
-    let mut applied_mode = config_value(&session, "mode");
-    if let Some(mode) = mode {
-        if !config_offers(&session, "mode", mode) {
-            let offered: Vec<String> = config_options(&session, "mode");
+    // The option is `agent`, not `mode`: 3.1.4 exposes `mode` as the permission
+    // mode (`ask`, `accept-edits`, `auto-approve`) and `agent` as the agent the
+    // session runs. Setting the role on `mode` is what made the first real run
+    // after the audit fail at the first spawn with "the session does not offer it
+    // … Offered: ask, accept-edits, auto-approve".
+    //
+    // An agent the session does not offer is the failure this whole path exists
+    // to prevent: the member keeps the session default, which is Vibe's coding
+    // prompt, and the lead implements the goal instead of planning it. The
+    // precondition in `preconditions_with` refuses a run before this point, but a
+    // precondition is a check and a check can be raced — the agent file can be
+    // deleted between the panel reading it and the spawn. So a missing agent is an
+    // error here, not a silent fallback.
+    let mut applied_agent = config_value(&session, "agent").or_else(|| config_value(&session, "mode"));
+    if let Some(agent) = agent {
+        let Some(option) = agent_option(&session, agent) else {
             return Err(format!(
-                "{member_id} could not run as `{mode}`: the session does not offer it, so it would have run on Vibe's coding prompt instead. Expected {} to define it. Offered: {}",
+                "{member_id} could not run as `{agent}`: no agent or mode on this session is named that, so it would have run on Vibe's coding prompt instead. Expected {} to define it. Agents offered: {}. Modes offered: {}",
                 crate::paths::vibe_home()
                     .join("agents")
-                    .join(format!("{mode}.toml"))
+                    .join(format!("{agent}.toml"))
                     .display(),
-                if offered.is_empty() {
-                    "nothing".to_string()
-                } else {
-                    offered.join(", ")
-                }
+                listed(&config_options(&session, "agent")),
+                listed(&config_options(&session, "mode")),
             ));
-        }
+        };
         if let Ok(result) = bridge
             .request(
                 "session/set_config_option",
                 json!({
                     "sessionId": session_id,
-                    "configId": "mode",
-                    "value": mode,
+                    "configId": option,
+                    "value": agent,
                 }),
             )
             .await
         {
-            applied_mode = config_value(&result, "mode").or(applied_mode);
+            applied_agent = config_value(&result, option).or(applied_agent);
         }
     }
 
@@ -1859,7 +1887,7 @@ async fn spawn_member(
         pid: status.pid,
         model: applied_model,
         thinking: applied_thinking,
-        mode: applied_mode,
+        agent: applied_agent,
         watch,
     })
 }
@@ -2327,7 +2355,7 @@ fn spawn_for_task(
             &path,
             &member.model,
             member.thinking.as_deref(),
-            Some(roles::mode_for(role)),
+            Some(roles::agent_for(role)),
             readable,
             ledger,
         )
@@ -2340,7 +2368,7 @@ fn spawn_for_task(
                     session_id,
                     pid,
                     thinking,
-                    mode,
+                    agent,
                     watch,
                     ..
                 } = spawned;
@@ -2422,7 +2450,7 @@ fn spawn_for_task(
                             member.pid = pid;
                             // What the session reports, not what was asked for.
                             member.thinking = thinking.clone();
-                            member.mode = mode.clone();
+                            member.agent = agent.clone();
                             // Starting, not working: the process exists and the
                             // session is open, but no turn has been asked for
                             // yet. The turn start is what makes it `working`,
@@ -3136,7 +3164,7 @@ fn spawn_reflector(sink: Arc<dyn EventSink>, run_id: String) {
             &workspace,
             &member.model,
             member.thinking.as_deref(),
-            Some(roles::mode_for(Role::Reflector)),
+            Some(roles::agent_for(Role::Reflector)),
             Vec::new(),
             None,
         )
@@ -3149,7 +3177,7 @@ fn spawn_reflector(sink: Arc<dyn EventSink>, run_id: String) {
                     session_id,
                     pid,
                     thinking,
-                    mode,
+                    agent,
                     watch,
                     ..
                 } = spawned;
@@ -3172,7 +3200,7 @@ fn spawn_reflector(sink: Arc<dyn EventSink>, run_id: String) {
                             member.session_id = Some(session_id.clone());
                             member.pid = pid;
                             member.thinking = thinking.clone();
-                            member.mode = mode.clone();
+                            member.agent = agent.clone();
                             member.state = MemberState::Working;
                             member.last_at = Some(now());
                         }
@@ -7530,6 +7558,33 @@ mod tests {
         std::fs::remove_dir_all(super::super::run_dir(&run.id)).ok();
     }
 
+    /// The role is set on whichever config option the session lists it on.
+    ///
+    /// A real run against `vibe-acp` 3.1.4 failed at the first spawn because the
+    /// engine set the role on `mode`, which on that version is the permission mode
+    /// (`ask`, `accept-edits`, `auto-approve`). The agent is a separate option. The
+    /// 3.1.2 layout put the agent in `mode`, so the choice is read from the session
+    /// rather than assumed, and neither list having the name is an error with both
+    /// lists in it.
+    #[test]
+    fn the_agent_is_set_on_whichever_option_the_session_lists_it() {
+        let modern = json!({ "configOptions": [
+            { "id": "mode", "options": [{ "value": "ask" }, { "value": "auto-approve" }] },
+            { "id": "agent", "options": [{ "value": "vibedesk-swarm-worker" }] },
+        ]});
+        assert_eq!(agent_option(&modern, "vibedesk-swarm-worker"), Some("agent"));
+
+        let older = json!({ "configOptions": [
+            { "id": "mode", "options": [{ "value": "ask" }, { "value": "vibedesk-swarm-worker" }] },
+        ]});
+        assert_eq!(agent_option(&older, "vibedesk-swarm-worker"), Some("mode"));
+
+        // Neither list has it, so the caller refuses rather than leaving the
+        // member on the session default — Vibe's coding prompt.
+        assert_eq!(agent_option(&modern, "vibedesk-swarm-lead"), None);
+        assert_eq!(agent_option(&json!({}), "vibedesk-swarm-worker"), None);
+    }
+
     /// Which clock fired is a fact about the error, not a sentence to parse.
     ///
     /// The audit's third fault: the evidence nudge, the wedged limit and driver
@@ -10486,7 +10541,7 @@ name: a");
             &worktree,
             "deepseek",
             Some("high"),
-            Some(roles::mode_for(Role::Worker)),
+            Some(roles::agent_for(Role::Worker)),
             Vec::new(),
             None,
         )
@@ -10501,8 +10556,8 @@ name: a");
         // without it the session does not offer the mode and keeps its default,
         // which is the silent fallback `provision::swarm_ready` exists to stop.
         assert_eq!(
-            spawned.mode.as_deref(),
-            Some(roles::mode_for(Role::Worker)),
+            spawned.agent.as_deref(),
+            Some(roles::agent_for(Role::Worker)),
             "the worker's own agent was requested and the session reports it back"
         );
         assert_eq!(
@@ -10746,7 +10801,7 @@ name: a");
             &worktree,
             "deepseek",
             Some("high"),
-            Some(roles::mode_for(Role::Worker)),
+            Some(roles::agent_for(Role::Worker)),
             Vec::new(),
             None,
         )

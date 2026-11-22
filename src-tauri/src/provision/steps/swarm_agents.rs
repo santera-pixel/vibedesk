@@ -70,7 +70,7 @@ pub fn install() -> Result<String, String> {
         std::fs::write(&path, file.body)
             .map_err(|error| format!("could not write {}: {error}", path.display()))?;
         // Named as the agent Vibe will advertise, not as the file, because the
-        // agent name is what `roles::mode_for` selects and what the user sees in
+        // agent name is what `roles::agent_for` selects and what the user sees in
         // the mode picker.
         written.push(match file.dir {
             Dir::Agents => payload::agent_name(file),

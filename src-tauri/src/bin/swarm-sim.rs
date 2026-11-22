@@ -63,20 +63,31 @@ fn main() {
                         "options": [{ "value": "sim", "name": "sim" }]
                     },
                     {
+                        // The permission mode, which is what `mode` means on
+                        // `vibe-acp` 3.1.4. Probed: `session/new` offers `ask`,
+                        // `accept-edits` and `auto-approve`.
                         "id": "mode",
-                        "currentValue": "auto",
-                        // The real agent offers one mode per installed swarm agent:
-                        // the app writes those TOMLs into VIBE_HOME/agents at
-                        // startup, and the engine refuses a member whose role mode
-                        // the session does not offer. A sim that offered only
-                        // `auto` failed every e2e run at the first spawn, so the
-                        // suite never reached the drive loop it exists to prove.
+                        "currentValue": "auto-approve",
                         "options": [
-                            { "value": "auto", "name": "auto" },
-                            { "value": "vibedesk-swarm-lead", "name": "Lead" },
-                            { "value": "vibedesk-swarm-worker", "name": "Worker" },
-                            { "value": "vibedesk-swarm-verifier", "name": "Verifier" },
-                            { "value": "vibedesk-swarm-reflector", "name": "Reflector" }
+                            { "value": "ask", "name": "Ask" },
+                            { "value": "accept-edits", "name": "Accept Edits" },
+                            { "value": "auto-approve", "name": "Auto Approve" }
+                        ]
+                    },
+                    {
+                        // The agent, which is where 3.1.4 lists the swarm's four
+                        // roles. The app provisions them into VIBE_HOME/agents and
+                        // the engine refuses a member whose agent the session does
+                        // not offer, so a sim without this list failed every e2e
+                        // run at the first spawn.
+                        "id": "agent",
+                        "currentValue": "default",
+                        "options": [
+                            { "value": "default", "name": "Default" },
+                            { "value": "vibedesk-swarm-lead", "name": "VibeDesk Swarm Lead" },
+                            { "value": "vibedesk-swarm-worker", "name": "VibeDesk Swarm Worker" },
+                            { "value": "vibedesk-swarm-verifier", "name": "VibeDesk Swarm Verifier" },
+                            { "value": "vibedesk-swarm-reflector", "name": "VibeDesk Swarm Reflector" }
                         ]
                     }
                 ]

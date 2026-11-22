@@ -982,7 +982,17 @@ pub struct Member {
     #[serde(default)]
     pub thinking: Option<String>,
     /// The agent mode the session was switched to, when one matched the role.
-    pub mode: Option<String>,
+    /// The agent this member runs as, as the session reported it —
+    /// `vibedesk-swarm-worker`, not a permission mode.
+    ///
+    /// `vibe-acp` 3.1.4 exposes two separate config options: `mode` is the
+    /// permission mode (`ask`, `accept-edits`, `auto-approve`) and `agent` is the
+    /// agent the session runs. The engine used to set the role on `mode`, so a
+    /// real run failed at the first spawn with "the session does not offer it …
+    /// Offered: ask, accept-edits, auto-approve". Old run files wrote the field as
+    /// `mode`, so that name is an alias rather than a break.
+    #[serde(default, alias = "mode")]
+    pub agent: Option<String>,
     pub state: MemberState,
     pub pid: Option<u32>,
     pub session_id: Option<String>,
@@ -1108,7 +1118,7 @@ impl Member {
             role,
             model: model.into(),
             thinking: None,
-            mode: None,
+            agent: None,
             // Queued, not starting. A member is created when the plan is
             // accepted and spawned when the scheduler has a slot for it, and the
             // gap between the two is most of the roster for most of the run.
