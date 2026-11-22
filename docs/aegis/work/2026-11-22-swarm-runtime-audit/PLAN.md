@@ -278,7 +278,7 @@ the work landed in.
 | 3 three liveness clocks, one path | restarts at 180 s, 600 s and process death were one event in the log | `c1136df`, `4063850`, `1037151` | one charging authority; silence measured and named; `RestartCause::{Infra,Timeout,Provider}` with separate counters; `MAX_INFRA_RESTARTS = 3` stops the run |
 | 4 estimates 13× low | 60 000-token constants against 39 M observed | `d630c4c`, `85c1b19` | `Estimates::of(history)` from `role_medians`, and the median reads **fresh** tokens, so the plan is not derived from a 94.7% cache hit |
 | 5 workers saw a truncated board | 12 entries / 2400 chars dropped the escalation | `6902979` | the task's own record and every escalation/conflict/verdict are pinned untruncated; only cross-task chatter is capped |
-| 6 stop left worktrees locked | 4 worktrees and 4 branches survived a cancel | `9529abf` | `delete` stops bridges → removes checkouts → deletes branches → removes the directory, and reports `cleanupProblems`; `SwarmPanel` calls it through `swarm_delete` |
+| 6 stop left worktrees locked | 4 worktrees and 4 branches survived a cancel | `9529abf`, plus `a_deleted_run_leaves_no_worktree_and_no_branch` | `delete` stops bridges → removes checkouts → deletes branches → removes the directory, and reports `cleanupProblems`; `SwarmPanel` calls it through `swarm_delete` |
 | 7 budget presented as usedTokens | 56 M read as spend when 51.5 M was cache | `65b9ef1` | `price()` in µusd over a versioned rate table, `spendMicros`/`spendPct`/`hitRate`/`unpricedModels` in the payload, `exceeded()` on money |
 | 8 working was not progress | five worktrees held README.md and .git | `476673c` | `filesChanged`, `commits`, `lastCommitAt`, `stalled` per task, with `stalled_secs` a pure rule |
 
@@ -624,6 +624,35 @@ sim: "D:/Temp/trap/swarm-sim.sh" is not valid JSON: expected value at line 1 col
 The end-to-end suite still passes against the strict double — 7/7 in 72.5 s — which
 is the check that matters, because every e2e test drives the sim through this
 function and a double that refused a valid script would fail all seven.
+
+### The cleanup path, and the test that now holds it
+
+Fault six was fixed and hand-verified, and it had no test: `delete` exists, the
+order is right, `cleanupProblems` is reported — and nothing would have noticed if
+a later change reordered it. `a_deleted_run_leaves_no_worktree_and_no_branch`
+closes that. It starts a real run, approves a real plan, waits for the t1 worktree
+to exist, asserts the pre-conditions first (a `-t1` branch, a registered checkout)
+so the test cannot pass by deleting nothing, then stops the run, deletes it, and
+checks each of the four things the audit found left behind: the worktree root, the
+branches, the git worktree registration, and the run directory.
+
+A green first try is not evidence, so the test was falsified: with `delete`'s
+branch list replaced by `Vec::new()`, it fails on exactly the audit's symptom —
+
+```
+every branch of the run is deleted, including the integration branch:
+"swarm/run-20261122-212519-000\n  swarm/run-20261122-212519-000-t1\n  swarm/run-20261122-212519-000-t2"
+```
+
+— and passes again with the line restored. Suite after: **8/8 in 82.7 s** (the new
+test alone, 9.5 s), with `engine.rs` byte-identical to the committed version.
+
+One design point worth recording, because it looks like the fault when it is not:
+`stop` deliberately keeps the worktrees and names them, so a cancelled run can be
+inspected; `delete` is what removes them, and `SwarmPanel` calls it. What changed
+from the audit is that nothing is *locked* — the member processes are gone before
+the removal is attempted, which is what made `git worktree remove` fail with
+"Permission denied" and what the ordering exists to prevent.
 
 ### Still not done (updated)
 

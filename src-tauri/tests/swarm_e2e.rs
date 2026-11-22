@@ -11,7 +11,7 @@
 //! loop, the real worktrees, the real git, the real two-tree proof and the real
 //! integration gate, with no model and no tokens.
 //!
-//! The four tests are the four shapes a run takes:
+//! The tests are the shapes a run takes:
 //!
 //! * `a_run_reaches_done` — the happy path, all the way to a reflection.
 //! * `a_worker_that_commits_outside_its_grant_is_corrected` — the worker strays,
@@ -21,6 +21,15 @@
 //!   amendment budget.
 //! * `a_verifier_that_escalates_goes_to_the_lead_not_the_user` — a question the
 //!   worker cannot answer reaches the lead as an amendment, and the run resumes.
+//! * `a_verifier_cannot_weaken_the_criterion_by_naming_an_easier_command` — the
+//!   verdict's own command is refused when it is not the one the plan named.
+//! * `a_dependent_starts_before_its_dependency_is_verified` — a rank-two worker
+//!   sees its dependency's commit in its own worktree.
+//! * `a_silent_worker_is_wedged_by_the_clock_that_names_itself` — a member that
+//!   answers and then produces nothing is caught by the wedged limit, and the
+//!   board says which clock fired.
+//! * `a_deleted_run_leaves_no_worktree_and_no_branch` — a cancelled run deletes
+//!   clean: no worktree registered, no branch left, no run directory.
 //!
 //! Serialized, because the engine is a process-wide singleton and the
 //! environment is process-wide too.
@@ -824,5 +833,83 @@ async fn a_silent_worker_is_wedged_by_the_clock_that_names_itself() {
     let sink: Arc<dyn vibedesk_lib::acp::bridge::EventSink> = h.sink.clone();
     let _ = engine().stop(&sink);
     h.release().await;
+    h.cleanup();
+}
+
+/// A stopped run can be deleted, and the delete leaves nothing behind.
+///
+/// This is the audit's sixth fault with a test under it. A cancelled run used to
+/// keep four worktrees and four branches, `git worktree remove --force` failed
+/// with "Permission denied" because the stopped workers still held the
+/// directories, and the next run inherited the mess. The fix orders the cleanup —
+/// stop the bridges, then the checkouts, then the branches, then the run
+/// directory — and the ordering is only worth anything if something executes it
+/// against a run that really did build worktrees.
+///
+/// The pre-conditions are asserted rather than assumed. A cleanup test whose
+/// subject never existed passes for the wrong reason: it proves that deleting
+/// nothing leaves nothing, which is not the claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_run_leaves_no_worktree_and_no_branch() {
+    let _guard = lock();
+    let h = Harness::new("cleanup", happy_script());
+    h.start().await;
+    let planned = h.approve().await;
+    let id = planned.id.clone();
+
+    let root = vibedesk_lib::swarm::worktree::worktree_root().join(&id);
+    wait_for("the t1 worktree to exist", Duration::from_secs(60), || {
+        root.join("w-t1").is_dir()
+    });
+    let before = git(&h.repo, &["branch", "--list", &format!("swarm/{id}*")]);
+    assert!(
+        before.contains("-t1"),
+        "the task branch exists before the delete, so the assertion after it can          fail: {before:?}"
+    );
+    let checkouts_before = git(&h.repo, &["worktree", "list"]);
+    assert!(
+        checkouts_before.contains(&id),
+        "a worktree is registered before the delete: {checkouts_before:?}"
+    );
+
+    // Stop first, exactly as the panel does. `delete` refuses a live run, and the
+    // refusal is the reason the two calls are separate.
+    let sink: Arc<dyn vibedesk_lib::acp::bridge::EventSink> = h.sink.clone();
+    let stopped = engine().stop(&sink).expect("the run stops");
+    assert_eq!(stopped.state, RunState::Cancelled);
+    h.release().await;
+
+    let live = engine().run();
+    assert!(
+        live.map(|run| !run.state.is_live()).unwrap_or(true),
+        "the run is no longer live, so the delete is allowed"
+    );
+
+    engine()
+        .delete(&sink, &id)
+        .await
+        .expect("the stopped run is deleted");
+
+    // The four things the audit found left behind, checked one by one.
+    assert!(
+        !root.exists(),
+        "the worktree root is gone: {}",
+        root.display()
+    );
+    let branches = git(&h.repo, &["branch", "--list", &format!("swarm/{id}*")]);
+    assert!(
+        branches.trim().is_empty(),
+        "every branch of the run is deleted, including the integration branch: {branches:?}"
+    );
+    let checkouts = git(&h.repo, &["worktree", "list"]);
+    assert!(
+        !checkouts.contains(&id),
+        "no worktree is still registered with git: {checkouts:?}"
+    );
+    assert!(
+        Run::load(&id).is_err(),
+        "the run directory is gone, so the run cannot be loaded"
+    );
+
     h.cleanup();
 }
